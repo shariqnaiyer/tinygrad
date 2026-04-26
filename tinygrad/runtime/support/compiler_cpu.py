@@ -1,3 +1,4 @@
+"""CPU compiler implementations: ClangJITCompiler (clang subprocess to ELF) and LLVMCompiler (LLVM C API for JIT codegen)."""
 import ctypes, platform, sys, subprocess
 from tinygrad.device import Compiler
 from tinygrad.helpers import OSX, getenv, capstone_flatdump, DEBUG, unwrap

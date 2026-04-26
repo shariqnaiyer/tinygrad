@@ -1,4 +1,15 @@
-# dsl.py - clean DSL for AMD assembly
+"""Domain-specific language for constructing and decoding AMD GPU instructions.
+
+This module provides the building blocks for AMD ISA support:
+- Reg: represents registers (SGPR, VGPR, special) with modifier support (neg, abs, hi).
+- BitField / SrcField / VGPRField / etc.: typed bit-field descriptors for instruction encoding.
+- Inst: base class for all instruction formats. Handles encoding, decoding, auto-upgrade to
+  variant classes (_LIT, _DPP16, _SDWA), and operand size validation from XML metadata.
+
+The auto-generated ins.py files (one per arch) subclass Inst to define concrete formats
+like VOP1, VOP2, VOP3, SMEM, etc. Each instruction helper (e.g. v_add_f32) is a functools.partial
+that pre-fills the opcode enum, so users write: v_add_f32(vdst=v[0], src0=v[1], src1=v[2]).
+"""
 from typing import Any
 
 # ══════════════════════════════════════════════════════════════

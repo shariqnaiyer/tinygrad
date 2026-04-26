@@ -1,3 +1,12 @@
+"""AMD HIP runtime backend. Uses the HIP Driver API (hipModuleLaunchKernel, etc.) for kernel loading and dispatch on
+AMD GPUs through the standard ROCm software stack. Simpler than the direct AM/KFD path in ops_amd.py but relies on
+the full ROCm runtime being installed.
+
+Key classes:
+  HIPDevice    -- Compiled device wrapping a HIP device context.
+  HIPProgram   -- Loads a compiled code object (hsaco) via hipModuleLoadData and launches kernels.
+  HIPAllocator -- LRU allocator backed by hipMalloc for device memory.
+"""
 import ctypes, functools
 from tinygrad.helpers import mv_address, getenv, suppress_finalizing
 from tinygrad.device import Compiled, LRUAllocator, BufferSpec
@@ -10,6 +19,8 @@ def check(status):
   if status != 0: raise RuntimeError(f"HIP Error {status}, {ctypes.string_at(hip.hipGetErrorString(status)).decode()}")
 
 class HIPDevice(Compiled):
+  """AMD HIP device using the ROCm HIP runtime API. Simpler than the direct AM path -- relies on hipMalloc,
+  hipModuleLaunchKernel, etc. for memory management and kernel dispatch."""
   def __init__(self, device:str=""):
     self.device_id = int(device.split(":")[1]) if ":" in device else 0
     self.arch = init_c_var(hip.hipDeviceProp_t, lambda x: check(hip.hipGetDeviceProperties(x, self.device_id))).gcnArchName.decode()

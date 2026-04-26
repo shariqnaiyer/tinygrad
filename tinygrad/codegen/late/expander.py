@@ -1,4 +1,26 @@
-# this converts a lowerer program into a vectorized program
+"""Expander: convert UPCAST/UNROLL ranges into explicit vectorised operations.
+
+After optimisation, the kernel graph contains RANGE UOps tagged as UPCAST or UNROLL.  These
+represent dimensions that should be register-tiled rather than looped.  The expander converts
+them into concrete UNROLL/CONTRACT/VECTORIZE UOps that produce wide (vectorised) values:
+
+  pm_pre_expander      -- Rewrite UPCAST/UNROLL-tagged RANGEs into UNROLL UOps carrying a
+                          constant vector [0, 1, ..., size-1].  Also fix up REDUCE and STORE
+                          nodes that reference these now-expanded ranges.
+
+  pm_group_for_reduce  -- Handle GROUP_REDUCE ranges: allocate a local buffer via BUFFERIZE,
+                          perform the partial reduce, then do a final cooperative reduce.
+
+  expander             -- The main expansion pass.  Pushes UNROLL through ALU/CAST/LOAD/STORE/
+                          INDEX/WMMA by replicating the op for each unrolled element and
+                          wrapping the result in a new UNROLL.  CONTRACT collapses an UNROLL
+                          back into a single wide vector (used for WMMA operands and BUFFERIZE).
+
+The expansion works bottom-up: each op that has UNROLL inputs produces an UNROLL output with
+appropriately GEP'd / broadcast inputs.  _swizzle_args handles the index remapping when
+expand_args differ between an op and its UNROLL source (e.g. a WMMA combining two differently-
+shaped expansions).
+"""
 import functools, itertools
 from tinygrad.dtype import dtypes, PtrDType, AddrSpace
 from tinygrad.helpers import dedup, flatten, all_same, prod, partition
@@ -20,6 +42,7 @@ def _swizzle_args(cargs:tuple[tuple[int, int], ...], eargs:tuple[tuple[int, int]
   return [_expand_arg_to_idx(eargs, {**rpk, **{x:0 for x in exclude_args}} if exclude_args else rpk) for rpk in _choices_from_args(cargs)]
 
 def do_expand(root:UOp):
+  """Push UNROLL through an op: replicate the op for each unrolled element and re-wrap in UNROLL."""
   expands = [x for x in root.src if x.op is Ops.UNROLL]
   if len(expands) == 0: return None
   # NOTE: we 0 out the reduce axis for WMMA. in theory they should all be the same, but is this always correct?

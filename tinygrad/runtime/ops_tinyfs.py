@@ -1,3 +1,14 @@
+"""TinyFS distributed storage backend. Connects to a TinyFS server (configurable via TINYFS_ENDPOINT) over TCP to
+store and retrieve tensor data across a cluster. Supports both LOAD and STORE operations with content-addressed
+chunking. An async thread pool handles parallel copyout from multiple storage nodes.
+
+Not a compute device -- it provides distributed storage for model weights and datasets.
+
+Key classes:
+  TinyFSDevice    -- Compiled device that maintains a TCP connection to the TinyFS coordinator.
+  TinyFSBuffer    -- Buffer handle tracking offset, size, and pending copyout/hash metadata.
+  TinyFSAllocator -- Allocator that streams data to/from TinyFS via the coordinator protocol.
+"""
 import socket, json, asyncio, threading, math
 from contextlib import asynccontextmanager
 from tinygrad.device import Compiled, Allocator
@@ -8,6 +19,8 @@ TINYFS_ENDPOINT = getenv("TINYFS_ENDPOINT", "localhost:6767")
 TINYFS_TIMEOUT = getenv("TINYFS_TIMEOUT", 60)
 
 class TinyFSDevice(Compiled):
+  """TinyFS distributed storage device. Connects to a TinyFS coordinator via TCP, fetches node topology, and spawns
+  an async event loop thread for parallel data transfers across storage nodes."""
   def __init__(self, device:str):
     self.op = device[len("tinyfs:"):].upper()
     super().__init__(device, TinyFSAllocator(self), [], None, None)

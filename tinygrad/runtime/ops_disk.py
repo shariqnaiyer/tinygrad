@@ -1,3 +1,15 @@
+"""Memory-mapped file storage backend. Maps files (or POSIX shared memory segments) into the process address space
+via mmap, allowing tinygrad to lazily load tensor data from disk without copying it into RAM first. On Linux, an
+io_uring ring is optionally set up for high-throughput async reads when sharded copyout is used.
+
+Not a compute device -- has no renderer or program runner. Data stored here must be transferred to a real device
+before any computation can happen.
+
+Key classes:
+  DiskDevice    -- Compiled device that opens/mmaps a file on first access and ref-counts open handles.
+  DiskBuffer    -- Lightweight handle pointing into the mmap'd region at a given offset and size.
+  DiskAllocator -- Allocator that manages mmap lifecycle and supports sharded io_uring-based copyout.
+"""
 import os, sys, mmap, io, ctypes, contextlib, pathlib
 from typing import Generator, Callable
 from tinygrad.helpers import OSX, round_up
@@ -7,6 +19,9 @@ with contextlib.suppress(ImportError):
   from tinygrad.runtime.autogen import io_uring, libc
 
 class DiskDevice(Compiled):
+  """Memory-mapped file device. Opens a file or POSIX shm segment and mmaps it on first buffer allocation.
+  Reference-counts open handles so the mmap is released when the last buffer is freed. On Linux, optionally sets up
+  an io_uring ring for high-throughput sharded reads."""
   _tried_io_uring_init = False
 
   def __init__(self, device:str):

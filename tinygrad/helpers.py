@@ -1,6 +1,23 @@
+"""Utility functions, global configuration, and shared infrastructure for all of tinygrad.
+
+This is the foundation module — it is imported by every other file in tinygrad and is NOT allowed
+to import from any other tinygrad module (to avoid circular dependencies).
+
+Key exports:
+  - ContextVar / Context: global configuration system (DEBUG, BEAM, DEV, etc.) with scoped overrides
+  - GlobalCounters: tracks kernel count, FLOPs, memory, and timing across all operations
+  - Target: parsed representation of the DEV= device/renderer/arch triple
+  - Timing / Profiling: context managers for benchmarking code sections
+  - fetch: URL/file download utility with disk caching
+  - diskcache_get / diskcache_put: SQLite-backed persistent key-value cache (used for compiled kernels)
+  - Utility functions: prod, flatten, ceildiv, colored, getenv, and many more
+
+The ContextVar system is how all runtime configuration works in tinygrad. Each ContextVar reads its
+initial value from an environment variable and can be temporarily overridden with Context(VAR=value).
+"""
 from __future__ import annotations
 import time
-START_TIME = time.perf_counter()
+START_TIME = time.perf_counter()  # track process startup time for profiling
 import os, functools, platform, re, contextlib, operator, hashlib, pickle, sqlite3, tempfile, pathlib, string, ctypes, sys, gzip, getpass, gc
 from collections import defaultdict
 import subprocess, shutil, math, types, copyreg, inspect, importlib, decimal, itertools, difflib
@@ -12,11 +29,12 @@ U = TypeVar("U")
 # NOTE: it returns int 1 if x is empty regardless of the type of x
 def prod(x:Iterable[T]) -> T|int: return functools.reduce(operator.mul, x, 1)
 
+# **************** platform detection ****************
 # NOTE: helpers is not allowed to import from anything else in tinygrad
 OSX, WIN = platform.system() == "Darwin", sys.platform == "win32"
 CI, BENCHMARKS = os.getenv("CI", "") != "", os.getenv("RUNNER_ENVIRONMENT", "") == "self-hosted"
 ARCH_X86 = any(x in platform.processor() for x in ("Intel", "i386", "x86_64"))
-BASEDIR = pathlib.Path(__file__).parent
+BASEDIR = pathlib.Path(__file__).parent  # path to the tinygrad package directory
 
 # fix colors on Windows, https://stackoverflow.com/questions/12492810/python-how-can-i-make-the-ansi-escape-codes-to-work-also-in-windows
 if WIN: os.system("")
@@ -157,6 +175,18 @@ def temp(x:str, append_user:bool=False) -> str:
 def stderr_log(msg:str): print(msg, end='', file=sys.stderr, flush=True)
 
 class Context(contextlib.ContextDecorator):
+  """Temporarily override one or more ContextVars within a scope.
+
+  Can be used as a context manager or decorator. Saves old values on __enter__,
+  restores them on __exit__. Nests properly — inner contexts override outer ones.
+
+  Example:
+    with Context(DEBUG=4, BEAM=2):
+      result = model(x).realize()  # runs with DEBUG=4 and BEAM=2
+
+    @Context(DEBUG=0)
+    def quiet_fn(): ...
+  """
   def __init__(self, **kwargs): self.kwargs = kwargs
   def __enter__(self):
     self.old_context:dict[str, Any] = {k: ContextVar._cache[k].value for k in self.kwargs}
@@ -165,7 +195,25 @@ class Context(contextlib.ContextDecorator):
     for k,v in self.old_context.items(): ContextVar._cache[k].value = v
 
 class ContextVar(Generic[T]):
-  _cache: ClassVar[dict[str, ContextVar]] = {}
+  """A global configuration variable that reads from environment and supports scoped overrides.
+
+  Each ContextVar is a singleton keyed by name. On creation, it reads its initial value from the
+  environment variable of the same name (cast to the type of default_value). The value can be
+  temporarily overridden using Context(KEY=value).
+
+  This is the backbone of tinygrad's configuration system — DEBUG, BEAM, JIT, IMAGE, etc. are
+  all ContextVars. They compare directly with their value (e.g., `if DEBUG >= 2:`).
+
+  Example:
+    DEBUG = ContextVar("DEBUG", 0)        # reads from $DEBUG env var, defaults to 0
+    if DEBUG >= 2: print("verbose")       # compares against .value via __ge__
+    with Context(DEBUG=4): ...            # temporarily sets DEBUG=4
+
+  Args:
+    key: Environment variable name and lookup key in _cache.
+    default_value: Default if env var is not set. Its type determines the cast type.
+  """
+  _cache: ClassVar[dict[str, ContextVar]] = {}  # global registry of all ContextVars, keyed by name
   value: T
   key: str
   def __init__(self, key: str, default_value: T):
@@ -183,6 +231,18 @@ class ContextVar(Generic[T]):
 
 @dataclass(frozen=True)
 class Target:
+  """Parsed representation of a DEV= device specification triple.
+
+  The DEV environment variable uses the format: [interface+]device[:renderer[:arch]]
+  For example: "AMD:LLVM:gfx950", "USB+AMD", "NV:CUDA:sm_70"
+
+  Fields:
+    device: Hardware backend name (AMD, NV, CUDA, METAL, CPU, etc.)
+    renderer: Code generator to use (LLVM, CUDA, etc.) — empty means auto-detect
+    arch: Target architecture (gfx950, sm_70, etc.) — empty means auto-detect
+    interface: How to access the device (USB, PCI, etc.) — empty means default
+    indices: Device indices for multi-GPU selection
+  """
   device: str = ""
   renderer: str = ""
   arch: str = ""
@@ -221,18 +281,35 @@ class _DEV(ContextVar):
       f"{k}={v} is deprecated, use DEV='{';'.join([repr(t) for t in self._value if t.device != dev] + [f'{dev}:{v}'])}' instead"
     return replace(next((t for t in self._value if not t.device or t.device == dev), Target(device=dev)).replacedefault(**kwargs), device=dev)
 
+# **************** global ContextVar declarations ****************
+# These are all controlled by environment variables of the same name and can be overridden with Context(VAR=value).
+# Core runtime
 DEV, DEBUG, BEAM, NOOPT = _DEV("DEV", ""), ContextVar("DEBUG", 0), ContextVar("BEAM", 0), ContextVar("NOOPT", 0)
+# DEV: target device triple (e.g. "AMD:LLVM:gfx950"), DEBUG: output verbosity 0-7, BEAM: kernel optimization search width, NOOPT: disable all optimization
 IMAGE, FLOAT16, OPENPILOT_HACKS = ContextVar("IMAGE", 0), ContextVar("FLOAT16", 0), ContextVar("OPENPILOT_HACKS", 0)
+# IMAGE: enable 2D image optimizations, FLOAT16: use fp16 for images, OPENPILOT_HACKS: compat mode for openpilot models
 JIT, JIT_BATCH_SIZE = ContextVar("JIT", 2 if OSX and ARCH_X86 else 1), ContextVar("JIT_BATCH_SIZE", 32)
+# JIT: 0=off, 1=on+graphs, 2=on-graphs (macOS x86 defaults to 2 because CUDA graphs aren't available)
 WINO, CAPTURING, TRACEMETA = ContextVar("WINO", 0), ContextVar("CAPTURING", 1), ContextVar("TRACEMETA", 1)
+# WINO: Winograd convolution, CAPTURING: record mode for process replay, TRACEMETA: track source locations in debug
+# Tensor core / matrix engine settings
 USE_TC, TC_SELECT, TC_OPT, AMX = ContextVar("TC", 1), ContextVar("TC_SELECT", -1), ContextVar("TC_OPT", 0), ContextVar("AMX", 0)
+# USE_TC: enable tensor core detection, TC_SELECT: pick specific TC variant (-1=auto), AMX: Apple AMX instructions
 TRANSCENDENTAL, NOLOCALS = ContextVar("TRANSCENDENTAL", 1), ContextVar("NOLOCALS", 0)
+# TRANSCENDENTAL: use hw transcendentals (sin/cos/exp/log), NOLOCALS: disable shared/local memory usage
+# Memory and scheduling
 SPLIT_REDUCEOP, NO_MEMORY_PLANNER, LRU = ContextVar("SPLIT_REDUCEOP", 1), ContextVar("NO_MEMORY_PLANNER", 0), ContextVar("LRU", 1)
+# Multi-GPU communication
 RING, ALL2ALL, ALLREDUCE_CAST = ContextVar("RING", 1), ContextVar("ALL2ALL", 0), ContextVar("ALLREDUCE_CAST", 1)
+# RING: ring topology for multi-GPU, ALL2ALL: all-to-all comm pattern, ALLREDUCE_CAST: cast during allreduce
+# Caching and codegen
 CACHELEVEL, IGNORE_BEAM_CACHE, DEVECTORIZE = ContextVar("CACHELEVEL", 2), ContextVar("IGNORE_BEAM_CACHE", 0), ContextVar("DEVECTORIZE", 1)
 VALIDATE_WITH_CPU, DISABLE_FAST_IDIV = ContextVar("VALIDATE_WITH_CPU", 0), ContextVar("DISABLE_FAST_IDIV", 0)
+# VALIDATE_WITH_CPU: re-run GPU results on CPU to check correctness, DISABLE_FAST_IDIV: use slow but exact integer division
 CORRECT_DIVMOD_FOLDING, FUSE_OPTIM = ContextVar("CORRECT_DIVMOD_FOLDING", 0), ContextVar("FUSE_OPTIM", 0)
+# FUSE_OPTIM: concatenate all optimizer params into one buffer for a single fused update kernel
 ALLOW_DEVICE_USAGE, MAX_BUFFER_SIZE = ContextVar("ALLOW_DEVICE_USAGE", 1), ContextVar("MAX_BUFFER_SIZE", 0)
+# ALLOW_DEVICE_USAGE: set to 0 in tests to prevent accidental GPU use, MAX_BUFFER_SIZE: cap buffer allocation (bytes, 0=unlimited)
 MAX_KERNEL_BUFFERS = ContextVar("MAX_KERNEL_BUFFERS", 0)
 EMULATED_DTYPES = ContextVar("EMULATED_DTYPES", "")
 CAPTURE_PROCESS_REPLAY = ContextVar("CAPTURE_PROCESS_REPLAY", 0)
@@ -268,11 +345,25 @@ class Metadata:
 # **************** global state Counters ****************
 
 class GlobalCounters:
+  """Tracks cumulative execution statistics across all kernel launches.
+
+  These are class-level (static) counters that accumulate as kernels execute.
+  Used by DEBUG>=2 output to show performance metrics. Call reset() before a
+  measurement run to get clean numbers.
+
+  Attributes:
+    global_ops: Total FLOPs executed across all kernels.
+    global_mem: Total bytes of memory accessed across all kernels.
+    time_sum_s: Total wall-clock execution time in seconds.
+    kernel_count: Number of kernels launched.
+    mem_used: Current device memory usage in bytes (NOT reset by reset()).
+    mem_used_per_device: Per-device memory tracking (NOT reset by reset()).
+  """
   global_ops: ClassVar[int] = 0
   global_mem: ClassVar[int] = 0
   time_sum_s: ClassVar[float] = 0.0
   kernel_count: ClassVar[int] = 0
-  mem_used: ClassVar[int] = 0   # NOTE: this is not reset
+  mem_used: ClassVar[int] = 0   # NOTE: this is not reset — it tracks current allocations, not cumulative
   mem_used_per_device: ClassVar[defaultdict] = defaultdict(int)   # NOTE: this is not reset
   @staticmethod
   def reset(): GlobalCounters.global_ops, GlobalCounters.global_mem, GlobalCounters.time_sum_s, GlobalCounters.kernel_count = 0,0,0.0,0
@@ -387,6 +478,7 @@ def diskcache_clear():
   cur.executescript("\n".join([s[0] for s in drop_tables] + ["VACUUM;"]))
 
 def diskcache_get(table:str, key:dict|str|int) -> Any:
+  """Retrieve a cached value from the SQLite disk cache. Returns None on miss or if caching disabled."""
   if CACHELEVEL < 1: return None
   if isinstance(key, (str,int)): key = {"key": key}
   cur = db_connection().cursor()
@@ -399,6 +491,7 @@ def diskcache_get(table:str, key:dict|str|int) -> Any:
 
 _db_tables = set()
 def diskcache_put(table:str, key:dict|str|int, val:Any, prepickled=False):
+  """Store a value in the SQLite disk cache. Creates the table on first use. Returns val for chaining."""
   if CACHELEVEL < 1: return val
   if isinstance(key, (str,int)): key = {"key": key}
   conn = db_connection()
@@ -436,6 +529,12 @@ def _ensure_downloads_dir() -> pathlib.Path:
 
 def fetch(url:str, name:pathlib.Path|str|None=None, subdir:str|None=None, gunzip:bool=False,
           allow_caching=not getenv("DISABLE_HTTP_CACHE"), headers:dict[str, str]={}) -> pathlib.Path:
+  """Download a file from URL and cache it locally. Returns path to the cached file.
+
+  Files are cached in ~/.cache/tinygrad/downloads/ (or /raid/downloads on tinybox hardware).
+  If url starts with "/" or ".", it's treated as a local path and returned directly.
+  Set DISABLE_HTTP_CACHE=1 to force re-download every time.
+  """
   import urllib.request
   if url.startswith(("/", ".")): return pathlib.Path(url)
   if name is not None and (isinstance(name, pathlib.Path) or '/' in name): fp = pathlib.Path(name)

@@ -1,3 +1,16 @@
+"""UOp specification and validation rules.
+
+Defines the "grammar" of valid UOp graphs — what combinations of (op, dtype, src, arg) are legal.
+When SPEC >= 1, every newly created UOp is validated against these rules. This catches compiler
+bugs early by ensuring the IR is well-formed at every stage of compilation.
+
+Key components:
+  - tensor_spec: validation rules for tensor-level UOp graphs (before scheduling)
+  - kernel_spec: validation rules for kernel-level UOp graphs (after scheduling, before codegen)
+  - program_spec: validation rules for program-level UOps (after codegen)
+  - type_verify: function that checks a UOp graph against a spec
+  - validate_index: checks buffer index bounds (when CHECK_OOB=1)
+"""
 import math
 from typing import cast, Any
 from tinygrad.uop.ops import PatternMatcher, UPat, GroupOp, Ops, UOp, print_uops, AxisType, KernelInfo, pyrender

@@ -1,3 +1,13 @@
+"""WebGPU runtime backend. Generates WGSL (WebGPU Shading Language) shaders and dispatches compute work through the
+Dawn/wgpu-native WebGPU implementation. This enables tinygrad to run on any platform with a WebGPU-capable driver,
+including browsers (via wasm) and native apps. Buffer reads require a staging copy because WebGPU forbids direct
+mapping of GPU storage buffers.
+
+Key classes:
+  WebGpuDevice    -- Compiled device that requests a WebGPU adapter and logical device.
+  WebGPUProgram   -- Creates a WGSL shader module and compute pipeline, then encodes dispatches.
+  WebGpuAllocator -- Allocator using wgpuDeviceCreateBuffer with storage/copy usage flags.
+"""
 import functools, struct
 from tinygrad.device import Compiled, Allocator, BufferSpec
 from tinygrad.renderer.wgsl import WGSLRenderer
@@ -193,6 +203,8 @@ class WebGpuAllocator(Allocator['WebGpuDevice']):
   def _free(self, opaque:WGPUBufPtr, options:BufferSpec): webgpu.wgpuBufferDestroy(opaque)
 
 class WebGpuDevice(Compiled):
+  """WebGPU device. Requests a high-performance adapter and logical device via Dawn/wgpu-native, optionally enabling
+  timestamp queries and shader f16 if the adapter supports them."""
   def __init__(self, device:str):
     # Requesting an adapter
     adapter_res = _run(webgpu.wgpuInstanceRequestAdapterF, webgpu.WGPURequestAdapterCallbackInfo, webgpu.WGPURequestAdapterCallback,

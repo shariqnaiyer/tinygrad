@@ -1,9 +1,32 @@
+"""Allreduce: generates multi-GPU reduction communication patterns.
+
+When a sharded reduction needs results on all devices (e.g. gradient averaging in data-parallel training),
+this module builds the UOp subgraph for the cross-device communication.  Three strategies are supported:
+
+  - **Naive** (default for small tensors or 2 GPUs): each shard is copied to every device and reduced locally.
+    Simple but O(N) bandwidth per device.
+  - **Ring allreduce** (RING=1, auto-enabled for >2 GPUs and >256K elements): reduce-scatter around a ring
+    followed by allgather.  O(1) bandwidth per device regardless of GPU count -- optimal for large tensors.
+  - **All-to-all** (ALL2ALL=1): each device sends its chunk to every other device (reduce-scatter), then
+    broadcasts results back.  Better than ring for high-bisection-bandwidth interconnects (e.g. NVSwitch).
+
+The data is chunked into N pieces (one per device) with sizes balanced to be divisible by a factor of up to
+32 for alignment.  create_allreduce_function wraps the pattern into a precompiled CALL so it can be cached
+and reused across training steps.
+"""
 import functools, itertools
 from tinygrad.helpers import all_int, prod, DEBUG, RING, ALL2ALL, getenv
 from tinygrad.uop.ops import UOp, Invalid
 
 # *** allreduce implementation ***
 def handle_allreduce(buf:UOp, red:UOp) -> UOp|None:
+  """Build the UOp subgraph for an allreduce operation across devices.
+
+  Selects naive/ring/all2all strategy based on tensor size and device count, then constructs the
+  reduce-scatter + allgather communication pattern as a composition of COPY, ALU, MSELECT, MSTACK,
+  PAD, and RESHAPE ops.  The result is a single UOp that, when scheduled, expands into the necessary
+  cross-device copy and compute kernels.
+  """
   if not isinstance(buf.device, tuple): return None
   assert all_int(buf.shape), f"does not support symbolic shape {buf.shape}"
   ndev, shape, numel = len(buf.device), buf.shape, prod(buf.shape)
@@ -55,6 +78,13 @@ def handle_allreduce(buf:UOp, red:UOp) -> UOp|None:
   return UOp.usum(*[c.pad(((s,numel-e),)) for (s,e),c in zip(chunks, copied_chunks)]).reshape(shape)
 
 def create_allreduce_function(buf:UOp, red:UOp, output:UOp|None=None) -> UOp|None:
+  """Wrap an allreduce pattern into a precompiled CALL for reuse across invocations.
+
+  Instead of inlining the full reduce-scatter/allgather graph every time, this creates a named
+  "allreduce" function with PARAMs for the output and input buffers.  The precompile=True flag
+  tells the scheduler to compile it once and cache the result, avoiding repeated scheduling overhead
+  in training loops where the same allreduce shape is used every step.
+  """
   # BUFFER without unique have unique added later
   if output is None: output = UOp.unique_const(red.dtype, Invalid, red.device, red.shape).contiguous()
   to = red.param_like(0)

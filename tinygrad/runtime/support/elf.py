@@ -1,3 +1,4 @@
+"""ELF binary loader: parses ELF64 sections and relocations, then JIT-links object files into executable memory."""
 import struct, ctypes, ctypes.util
 from dataclasses import dataclass
 from tinygrad.helpers import getbits, i2u, unwrap

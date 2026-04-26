@@ -1,4 +1,24 @@
-# mixins add syntactic sugar to Tensor and UOp
+"""Movement operations mixin: shape manipulation without changing data.
+
+Defines the 6 core movement ops that exist in the tensor graph:
+  - reshape: change the logical shape (same number of elements)
+  - permute: reorder dimensions (transpose, T)
+  - expand: broadcast a size-1 dimension to a larger size (no copy)
+  - pad: add zero-padding around dimensions
+  - shrink: slice/crop dimensions to a sub-range
+  - flip: reverse elements along an axis
+
+Also provides derived operations built from these primitives:
+  - flatten, unflatten, view: reshape variants
+  - transpose, T: permute variants
+  - unsqueeze, squeeze: add/remove size-1 dimensions
+  - repeat, tile: tiling via expand+reshape
+  - slice (__getitem__): Python-style indexing and slicing
+
+These ops are "free" in the sense that they don't move data — they only change how
+the buffer is indexed. The actual index transformation happens during codegen in
+schedule/indexing.py and schedule/rangeify.py.
+"""
 from __future__ import annotations
 from typing import TYPE_CHECKING, Self, Sequence
 from tinygrad.uop import Ops
@@ -10,6 +30,7 @@ if TYPE_CHECKING:
 
 
 class MovementMixin:
+  """Mixin providing shape/movement operations. Inherited by Tensor and UOp."""
   # required to implement
   def _mop(self, op: Ops, arg) -> Self:
     raise NotImplementedError

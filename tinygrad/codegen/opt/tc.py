@@ -1,3 +1,28 @@
+"""Tensor core (WMMA) definitions for each supported GPU architecture.
+
+A TensorCore describes one hardware matrix-multiply-accumulate instruction:
+  D(M,N) = A(M,K) * B(K,N) + C(M,N)
+
+Each TensorCore specifies:
+  - dims (N, M, K)              -- the tile dimensions of the hardware instruction.
+  - threads                     -- how many threads cooperate in one WMMA (warp size, e.g. 32).
+  - elements_per_thread (A,B,C) -- how many matrix elements each thread is responsible for.
+  - dtype_in / dtype_out        -- input and output data types.
+  - opts                        -- a tuple of "u0"/"l0"/... strings that prescribe the sequence
+                                   of UPCAST and LOCAL axis splits needed to tile the kernel to
+                                   match the hardware instruction shape.  Each entry splits one
+                                   axis by a factor of 2; "u" = upcast, "l" = local.
+  - swizzle                     -- two remapping tuples (one per input operand) that describe how
+                                   the (local, upcast, reduce) axes of the tiled kernel map onto
+                                   the physical register layout expected by the WMMA instruction.
+
+This module contains TensorCore definitions for:
+  - NVIDIA CUDA (sm75 through sm89, including fp8 on sm89)
+  - AMD RDNA3/RDNA4 and CDNA3/CDNA4
+  - Apple Metal (M-series GPU SIMD-group matrix ops)
+  - Apple AMX (CPU matrix co-processor)
+  - Intel (Xe / Arc DPAS)
+"""
 import math, functools
 from dataclasses import dataclass
 from tinygrad.dtype import DType, dtypes

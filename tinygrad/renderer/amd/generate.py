@@ -1,4 +1,14 @@
-# AMD ISA code generator - generates enum.py, ins.py, operands.py, str_pcode.py
+"""AMD ISA code generator -- parses AMD's machine-readable XML and PDF manuals to produce
+the auto-generated Python files under tinygrad/runtime/autogen/amd/{rdna3,rdna4,cdna}/:
+  - enum.py: opcode enums (VOP1Op, VOP2Op, etc.) with one member per instruction.
+  - ins.py: Inst subclasses for each encoding format, plus functools.partial helpers.
+  - operands.py: per-opcode operand metadata (data format, bit width, operand type).
+  - str_pcode.py: pseudocode strings extracted from AMD's PDF ISA manuals.
+
+Run as __main__ to regenerate all files. The XML is fetched from AMD's GPUOpen bundle and
+the PDFs are fetched from AMD's documentation site. Pin XML_URL to a specific bundle date
+to avoid breakage when AMD updates the format.
+"""
 # Sources: XML from https://gpuopen.com/download/machine-readable-isa/latest/
 #          PDF manuals from AMD documentation
 import re, zlib, xml.etree.ElementTree as ET, zipfile, pathlib

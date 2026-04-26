@@ -1,3 +1,4 @@
+"""Memory allocation utilities: BumpAllocator for simple linear allocation and TLSFAllocator for efficient buffer suballocation."""
 import collections, functools, dataclasses, enum
 from typing import Any, ClassVar
 from tinygrad.helpers import round_up, getenv

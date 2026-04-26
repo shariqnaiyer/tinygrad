@@ -1,3 +1,4 @@
+"""USB device communication layer using libusb: bulk transfers, UAS/BOT protocols, and MMIO-over-USB for external GPU access."""
 import ctypes, struct, dataclasses, array, itertools, time
 from typing import Sequence
 from tinygrad.runtime.autogen import libusb

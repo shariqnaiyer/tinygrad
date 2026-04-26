@@ -1,3 +1,16 @@
+"""NVIDIA PTX virtual ISA code generation.
+
+PTXRenderer emits PTX assembly (not SASS) from the UOps graph. PTX is a stable virtual ISA
+that NVIDIA's driver JIT-compiles to the actual GPU microcode, so the same output works across
+GPU generations (sm_75+). Compared to the CUDA C path, PTX gives tinygrad direct control over
+register allocation and instruction selection without going through nvcc/nvrtc.
+
+Key design choices:
+- Registers are named with a type prefix (e.g. %alu_f32_0) so the PTX assembler can verify types.
+- WMMA instructions are emitted inline with explicit register packing/unpacking.
+- bool is stored as uint8 in memory (PTX has no native 1-bit memory ops).
+- Pointer arithmetic is done in uint64 while values are still in the UOps graph (via ptx_matcher).
+"""
 from typing import cast, Callable
 import struct
 from collections import defaultdict

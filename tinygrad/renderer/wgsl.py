@@ -1,3 +1,13 @@
+"""WebGPU Shading Language (WGSL) compute shader generation.
+
+WGSLRenderer produces WGSL source for the WebGPU backend. WGSL has several constraints
+that make it different from other C-style targets:
+- No 8/16-bit integer types in storage buffers, so sub-32-bit loads/stores are packed into
+  uint32 atomics (packed_load / packed_store).
+- No native bool comparisons in shifts, so CMPLT/XOR on bools cast through int.
+- NaN detection (a != a) must be rewritten because WGSL's != follows IEEE semantics.
+- Bindings use @group/@binding decorators instead of kernel arguments.
+"""
 from tinygrad.dtype import DType, PtrDType, dtypes, truncate, AddrSpace
 from tinygrad.uop.ops import UOp, Ops, PatternMatcher, UPat
 from tinygrad.renderer.cstyle import CStyleLanguage, base_rewrite, extra_pm

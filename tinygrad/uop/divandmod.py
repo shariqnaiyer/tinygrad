@@ -1,3 +1,16 @@
+"""Symbolic division and modulo simplification.
+
+Division and modulo are expensive on most hardware and common in index expressions
+(e.g., converting a flat index to multi-dimensional coordinates). This module provides
+PatternMatcher rules that simplify div/mod expressions symbolically, avoiding the need
+for actual division instructions in generated code.
+
+For example: (x * 4 + y) // 4  ->  x  (when 0 <= y < 4)
+             (x * 4 + y) % 4   ->  y  (when 0 <= y < 4)
+
+The CORRECT_DIVMOD_FOLDING flag controls whether to use the more precise (but slower)
+folding rules that handle edge cases correctly.
+"""
 import functools, itertools, math
 from tinygrad.uop.ops import PatternMatcher, UPat, Ops, UOp
 from tinygrad.dtype import dtypes

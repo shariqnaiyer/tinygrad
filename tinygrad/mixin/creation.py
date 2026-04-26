@@ -1,7 +1,14 @@
+"""Creation mixin: methods for creating tensors with the same shape as an existing tensor.
+
+Provides const_like, full_like, zeros_like, ones_like — convenience methods that create
+a new tensor matching the shape (and optionally dtype) of self. These are the building
+blocks used throughout the codebase for things like masking, initialization, and identity elements.
+"""
 from typing import Self
 from tinygrad.dtype import ConstType, DType
 
 class CreationMixin:
+  """Mixin providing tensor creation methods relative to an existing tensor's shape."""
   def const_like(self, b: ConstType) -> Self: raise NotImplementedError
   def cast(self, dtype: DType) -> Self: raise NotImplementedError
 

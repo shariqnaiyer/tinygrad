@@ -1,3 +1,16 @@
+"""RDMA networking backend for multi-node GPU communication. Uses Mellanox ConnectX NICs (via a userspace MLX5
+driver) to perform zero-copy transfers between GPU buffers on different machines, bypassing the CPU and OS network
+stack entirely. Queue pairs (QPs) are connected on demand and cached for reuse.
+
+Not a compute device -- it only provides a transfer path. Buffers are registered with the NIC's memory translation
+table so the RDMA engine can DMA directly to/from GPU VRAM over the PCIe BAR.
+
+Key classes:
+  RDMADevice     -- HCQ-compiled device wrapping a Mellanox NIC interface.
+  RDMACopyQueue  -- HWQueue that builds RDMA send work queue entries (WQEs) for remote buffer copies.
+  MLXIface       -- PCIIfaceBase subclass that manages the MLX5 device, queue pairs, and doorbell records.
+  RDMAAllocator  -- Registers GPU buffers with the NIC for RDMA access and coordinates cross-device transfers.
+"""
 from __future__ import annotations
 import mmap, struct, functools
 from typing import cast
@@ -99,6 +112,8 @@ class RDMAAllocator(HCQAllocatorBase):
     dest_q.signal(dest_dev.timeline_signal, dest_dev.next_timeline()).submit(dest_dev)
 
 class RDMADevice(HCQCompiled):
+  """RDMA NIC device wrapping a Mellanox ConnectX adapter. Provides no compute capability -- only cross-node buffer
+  transfers via RDMA queue pairs. The MLXIface handles NIC initialization and QP connection caching."""
   def __init__(self, device:str=""):
     self.device_id = int(device.split(":")[1]) if ":" in device else 0
     self.iface = MLXIface(self, self.device_id)

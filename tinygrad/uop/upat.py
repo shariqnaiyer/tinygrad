@@ -1,3 +1,13 @@
+"""UPat compilation — compiles pattern matching rules into efficient Python code.
+
+UPat patterns are declarative (match this op with these src patterns), but naive interpretation
+is slow. This module compiles UPat rules into specialized Python functions that do the matching
+with minimal overhead. This is critical for performance since pattern matching runs on every
+UOp during graph_rewrite(), which is called many times during compilation.
+
+The compiled matchers use direct attribute checks and avoid the overhead of the general-purpose
+matching infrastructure.
+"""
 from typing import Any, Callable
 import itertools, inspect, functools, types
 from tinygrad.helpers import partition, dedup, Context

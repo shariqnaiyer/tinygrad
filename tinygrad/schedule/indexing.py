@@ -1,3 +1,20 @@
+"""Indexing: computes buffer addresses from tensor-level indices and manages the rangeify pass.
+
+This module does two closely related things:
+
+  1. **Movement op lowering** (apply_movement_op): defines how each movement op transforms loop indices.
+     PERMUTE reorders axes, SHRINK adds offsets, EXPAND zeros out broadcasted axes, FLIP reverses them,
+     PAD adds validity checks, and RESHAPE converts between index spaces via modular arithmetic.
+     These are all pure index transformations -- no data is moved.
+
+  2. **The rangeify pass** (run_rangeify): walks the tensor DAG top-down (from outputs to inputs),
+     assigning RANGE loop variables to each tensor's axes.  It decides which ops get their own ranges
+     (realized ops) vs inherit ranges from their consumers (fused ops).  When an op has multiple
+     consumers with incompatible ranges, new ranges are created and the op is (partially) realized.
+     The output is an IndexingContext with the range_map (which ranges each op uses) and realize_map
+     (which ops need intermediate buffers), plus a rewritten UOp graph where REDUCE_AXIS has become
+     REDUCE with explicit RANGE sources and PAD has become WHERE with validity guards.
+"""
 from typing import Iterator
 import functools, itertools
 from dataclasses import dataclass, field
@@ -38,6 +55,13 @@ pm_generate_realize_map = PatternMatcher([
 
 @dataclass(frozen=True)
 class BufferizeOpts:
+  """Options attached to a BUFFERIZE node to control how it becomes a real buffer.
+
+  - device: which device the buffer lives on (or an int id for local memory).
+  - addrspace: GLOBAL (main memory, persists across kernel) vs LOCAL (shared/workgroup memory, kernel-scoped).
+  - removable: whether the cost-based remove_bufferize heuristic is allowed to inline this away.
+    False for user-requested contiguous() and COPY sources that must be materialized.
+  """
   # on AddrSpace.LOCAL, device is the id
   device: str|tuple[str, ...]|int|None
   addrspace: AddrSpace = AddrSpace.GLOBAL
@@ -45,6 +69,14 @@ class BufferizeOpts:
 
 @dataclass
 class IndexingContext:
+  """Mutable state accumulated during the rangeify pass.
+
+  - realize_map: ops that need materialization.  Value is None (fully realized, ranges TBD) or a list of
+    axis indices that must be realized (partial realization -- only those axes get new ranges).
+  - range_map: for each op, a (input_ranges, output_ranges) tuple.  Input ranges are what the op's sources
+    see; output ranges are what the op's consumers see.  Movement ops transform between the two.
+  - range_idx: monotonic counter for creating globally unique RANGE ids.
+  """
   realize_map: dict[UOp, None|list[int]] = field(default_factory=dict)
   range_map: dict[UOp, tuple[tuple[UOp, ...], tuple[UOp, ...]]] = field(default_factory=dict)
 
@@ -126,7 +158,8 @@ def _apply_reshape(in_shape:tuple[sint,...], out_shape:tuple[sint, ...], urngs:U
   # this simplify is doing a lot of heavy lifting. this is the replacement for the reshape view merging code
   return graph_rewrite(UOp.sink(*axes_out[::-1]), symbolic+pm_simplify_valid+pm_drop_and_clauses, name="reshape")
 
-# this is the definition of the movement ops
+# this is the definition of the movement ops -- each one is a pure index transformation.
+# given the output ranges (what the consumer iterates over), compute the input ranges (what the source sees).
 @functools.cache
 def apply_movement_op(op:Ops, in_shape:tuple[sint,...], arg:tuple, rngs:tuple[UOp, ...]) -> tuple[UOp, ...]:
   match op:
@@ -148,6 +181,18 @@ def apply_movement_op(op:Ops, in_shape:tuple[sint,...], arg:tuple, rngs:tuple[UO
 
 @profile_matches
 def run_rangeify(tsink:UOp, debug:bool=False) -> tuple[UOp, IndexingContext]:
+  """Assign RANGE loop variables to every tensor op and decide fusion boundaries.
+
+  Walks the tensor DAG in reverse topological order (outputs first, inputs last).  For each op:
+    - If it is in the realize_map, it gets fresh ranges (= new kernel boundary).
+    - If it has exactly one consumer, it inherits that consumer's ranges (= fused into same kernel).
+    - If it has multiple consumers with compatible ranges, those are merged (still fused).
+    - If consumers have incompatible ranges, new ranges are created and the op is partially realized.
+
+  After range assignment, a bottom-up graph_rewrite applies the ranges: REDUCE_AXIS becomes REDUCE with
+  explicit RANGE sources, PAD becomes WHERE with validity guards, and realized ops get BUFFERIZE nodes
+  that will later become actual buffer allocations.
+  """
   if debug: print("**************************")
   rctx = IndexingContext()
 

@@ -1,3 +1,22 @@
+"""Complex tensor operations built on top of the elementwise, reduce, and movement mixins.
+
+OpMixin is the top-level mixin that Tensor inherits. It combines ElementwiseMixin (arithmetic,
+activations, comparisons) and ReduceMixin (sum, max, mean) and adds higher-level operations:
+  - dot / matmul: matrix multiplication (via reshape + multiply + reduce)
+  - conv2d / conv_transpose2d: convolution operations
+  - _pool: generic pooling (max pool, avg pool)
+  - pad / _slice: padding and slicing with constant values
+  - one_hot, scatter, multinomial: utility operations
+  - loss functions: cross_entropy, binary_crossentropy, etc.
+
+The key insight is that ALL operations are built from just 4 primitive categories:
+  1. Elementwise (add, mul, exp, etc.)
+  2. Reduce (sum, max along axes)
+  3. Movement (reshape, expand, permute, pad, shrink)
+  4. Buffer (load, store)
+
+Even complex operations like conv2d are decomposed into these primitives.
+"""
 import functools, itertools
 from typing import Self, Sequence, Literal, get_args
 from tinygrad.mixin.elementwise import ElementwiseMixin
@@ -12,6 +31,7 @@ ReductionStr = Literal["mean", "sum", "none"]
 
 
 class OpMixin(ElementwiseMixin, ReduceMixin):
+  """Top-level operation mixin that Tensor inherits. Combines elementwise + reduce + complex ops."""
   def _pad_constant(self, pX, value:float) -> Self:
     # shrink first for negative pads, then pad with only non-negative values
     pX = tuple((0, 0) if p is None else p for p in pX)

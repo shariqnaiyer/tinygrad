@@ -1,3 +1,13 @@
+"""AMD GPU instruction format detection and decoding.
+
+This module provides detect_format() and decode_inst() for disassembling raw machine code
+bytes into structured Inst objects. It supports three ISA families (CDNA, RDNA3, RDNA4)
+by lazy-loading the auto-generated instruction tables from tinygrad.runtime.autogen.amd.
+
+The detection logic matches fixed encoding bits first, then checks SDWA/DPP variant markers
+in the src0 field (bits 0-8). Format tables are ordered most-specific-first so that
+multi-dword encodings (VOP3, VOPD) match before shorter ones (VOP1, VOP2).
+"""
 # Instruction format detection and decoding
 from __future__ import annotations
 from tinygrad.renderer.amd.dsl import Inst, FixedBitField, EnumBitField

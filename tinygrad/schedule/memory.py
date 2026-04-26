@@ -1,3 +1,16 @@
+"""Memory planner: suballocates intermediate buffers to reduce peak memory usage.
+
+After scheduling produces a LINEAR sequence of kernels, each internal temporary buffer has a known lifetime
+(first kernel that uses it to last kernel that uses it).  This module replaces individual buffer allocations
+with BUFFER_VIEW slices into a small number of shared per-device "arena" buffers, using TLSF (Two-Level
+Segregated Fit) allocation to pack non-overlapping lifetimes into the same memory.
+
+Key design choices:
+  - Copy buffers and compute buffers are placed in separate "lanes" so that reusing memory between them
+    does not accidentally serialize copy and compute engines (which can overlap on modern GPUs).
+  - Held buffers (those the JIT cache still references) and DISK/TINYFS buffers are excluded from planning.
+  - A 256-byte block size ensures alignment for all common dtypes and hardware requirements.
+"""
 from collections import defaultdict
 from tinygrad.device import Device
 from tinygrad.helpers import NO_MEMORY_PLANNER, DEBUG, round_up
@@ -18,6 +31,12 @@ def _can_plan(b:UOp, held_bufs:set[UOp]) -> bool:
 LaneKey = tuple[str, int]
 
 def memory_plan_rewrite(linear:UOp, held_bufs:set[UOp]|None=None) -> UOp:
+  """Replace individual buffer allocations with suballocated views into shared arenas.
+
+  Scans the LINEAR sequence to compute each buffer's lifetime (first and last kernel appearance), then
+  uses TLSF to assign offsets within per-(device, lane) arenas.  The result is a rewritten LINEAR where
+  each plannable BUFFER UOp is replaced by a BUFFER_VIEW into the appropriate arena.
+  """
   if NO_MEMORY_PLANNER: return linear
   if held_bufs is None: held_bufs = set()
 

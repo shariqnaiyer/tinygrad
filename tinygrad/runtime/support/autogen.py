@@ -1,3 +1,4 @@
+"""Auto-generation of Python FFI bindings from C headers using libclang: parses structs, enums, typedefs, and functions into ctypes code."""
 import ctypes, itertools, re, functools, os, keyword
 from tinygrad.helpers import unwrap
 import tinygrad.runtime.autogen.libclang as clang # use REGEN=1 to regenerate libclang bindings

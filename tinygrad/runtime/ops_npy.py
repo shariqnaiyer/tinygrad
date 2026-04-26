@@ -1,3 +1,11 @@
+"""NumPy-backed pseudo-device for data loading. Not a real compute backend -- it has no renderer or program runner.
+Buffers are numpy uint8 arrays; the allocator supports copyout (GPU->host) but not compute. This device exists so
+that numpy data can be loaded into tinygrad's buffer system and then transferred to an actual compute device.
+
+Key classes:
+  NpyDevice    -- Compiled device with an empty renderer list and no program runner.
+  NpyAllocator -- Allocator that wraps numpy arrays and exposes them as contiguous memoryviews.
+"""
 import numpy as np
 from tinygrad.helpers import flat_mv
 from tinygrad.device import Compiled, Allocator
@@ -8,4 +16,6 @@ class NpyAllocator(Allocator['NpyDevice']):
   def _copyout(self, dest:memoryview, src:np.ndarray): dest[:] = self._as_buffer(src)
 
 class NpyDevice(Compiled):
+  """NumPy pseudo-device for data ingestion. Has no renderer or program runner -- exists solely to wrap numpy arrays
+  as tinygrad buffers so they can be transferred to a real compute device."""
   def __init__(self, device:str): super().__init__(device, NpyAllocator(self), [], None)

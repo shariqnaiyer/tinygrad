@@ -1,3 +1,21 @@
+"""Elementwise operations mixin: arithmetic, logic, comparisons, activations, and math functions.
+
+Defines all operations that apply independently to each element of a tensor. This includes:
+  - Arithmetic: +, -, *, /, **, neg, reciprocal
+  - Comparison: <, >, ==, !=, <=, >=
+  - Logic: logical_not, where
+  - Activations: relu, sigmoid, tanh, gelu, silu, leaky_relu, mish, softplus, etc.
+  - Math: exp, log, sqrt, sin, cos, abs, sign, ceil, floor, round, clip, lerp
+  - Special: softmax, log_softmax
+
+All operations are lazy — they build UOp graph nodes without executing. The actual compute
+happens when the tensor is realized. Most operations are built on top of a single .alu() primitive
+that maps to UOp Ops like ADD, MUL, EXP2, LOG2, etc.
+
+Activations like sigmoid, tanh, and gelu are implemented as compositions of primitive ops
+(e.g., sigmoid = 1/(1+exp(-x))) rather than dedicated hardware operations, allowing them to
+be fused into surrounding kernels.
+"""
 import math, functools, operator
 from typing import Self
 from tinygrad.uop import Ops
@@ -8,6 +26,7 @@ from tinygrad.mixin.creation import CreationMixin
 
 
 class ElementwiseMixin(DTypeMixin, CreationMixin):
+  """Mixin providing elementwise operations. Inherited by Tensor and UOp."""
   # required to implement
   def alu(self, op: Ops, *src: Self) -> Self:
     raise NotImplementedError

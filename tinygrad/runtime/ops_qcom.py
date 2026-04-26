@@ -1,3 +1,14 @@
+"""Qualcomm Adreno GPU backend. Drives Adreno GPUs (A6xx/A7xx) via the KGSL (Kernel Graphics Support Layer) kernel
+driver, building CP (Command Processor) command packets (type 4/type 7) for register writes, cache management, and
+compute dispatch. Uses the HCQ framework for queue submission and synchronization.
+
+Supports both Mesa/Turnip and Qualcomm proprietary shader ISAs via the IR3Renderer and QCOMCLRenderer.
+
+Key classes:
+  QCOMDevice        -- HCQ-compiled device that opens /dev/kgsl-3d0 and sets up a draw context.
+  QCOMComputeQueue  -- HWQueue that encodes Adreno CP packets for compute dispatch and synchronization.
+  QCOMProgram       -- Loads compiled shader binaries and configures Adreno-specific register state for dispatch.
+"""
 from __future__ import annotations
 import os, ctypes, functools, mmap, struct, array, math, sys, weakref, contextlib
 assert sys.platform != 'win32'
@@ -344,6 +355,8 @@ class QCOMAllocator(HCQAllocatorBase):
 def flag(nm, val): return (val << getattr(kgsl, f"{nm}_SHIFT")) & getattr(kgsl, f"{nm}_MASK")
 
 class QCOMDevice(HCQCompiled):
+  """Qualcomm Adreno GPU device via KGSL. Opens /dev/kgsl-3d0, creates a draw context with fine-grain preemption,
+  and allocates GPU-visible command and border-color buffers for compute dispatch."""
   def __init__(self, device:str=""):
     self.fd = FileIOInterface('/dev/kgsl-3d0', os.O_RDWR)
     self.dummy_addr = int(self._gpu_alloc(0x1000).va_addr)

@@ -1,3 +1,4 @@
+"""AMD-specific runtime support: GPU register definitions (AMDReg), IP block versioning (AMDIP), and ASIC register header importing."""
 import functools, re, urllib, tinygrad.runtime.autogen
 from collections import defaultdict
 from dataclasses import dataclass

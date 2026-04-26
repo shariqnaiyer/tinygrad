@@ -1,3 +1,15 @@
+"""Null device for testing and benchmarking without real hardware. All allocations are no-ops, all kernel launches
+return instantly with a fake timing value, and copyout raises by default (controlled by NULL_ALLOW_COPYOUT). The
+renderer list includes every known renderer so that codegen can be tested for any target architecture.
+
+Useful for CI, compiler testing, and measuring scheduling/graph overhead without GPU access.
+
+Key classes:
+  NullDevice    -- Compiled device that registers all renderers and uses no-op allocator/program.
+  NullProgram   -- Immediately returns a fixed 1ms execution time.
+  NullAllocator -- All alloc/copy operations are no-ops (or raise on copyout).
+  NullGraph     -- No-op graph runner that returns a fixed 100ms time.
+"""
 import inspect, functools
 from tinygrad.device import Compiled, Allocator
 from tinygrad.engine.jit import MultiGraphRunner
@@ -30,6 +42,8 @@ class NullGraph(MultiGraphRunner):
   def __call__(self, input_buffers, var_vals, wait=False) -> float|None: return 1e-1
 
 class NullDevice(Compiled):
+  """Null device for testing. Registers every known renderer so codegen targeting any architecture can be validated
+  without hardware. All operations are no-ops; kernel launches return a fake 1ms timing."""
   def __init__(self, device:str):
     assert (emu:=getenv("EMULATE", "")) == "", \
       "EMULATE is deprecated, use DEV=NULL:HIP:"+{"AMD":"gfx1100", "AMD_RDNA4":"gfx1201", "AMD_CDNA4":"gfx950"}.get(emu, "<arch>")

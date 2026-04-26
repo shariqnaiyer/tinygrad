@@ -1,7 +1,13 @@
+"""Data type mixin: dtype queries and type conversion methods.
+
+Provides dtype-related properties and methods: element_size, is_floating_point,
+float/half/int/bool conversion, and the underlying cast operation.
+"""
 from typing import Self
 from tinygrad.dtype import DType, dtypes
 
 class DTypeMixin:
+  """Mixin providing dtype-related operations. Inherited by Tensor and UOp."""
   @property
   def dtype(self) -> DType: raise NotImplementedError
 

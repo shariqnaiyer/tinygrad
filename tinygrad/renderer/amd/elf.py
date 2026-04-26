@@ -1,4 +1,14 @@
-# minimal amdgpu elf packer
+"""Minimal ELF packer for AMD GPU kernel binaries.
+
+do_assemble_amd() takes a list of encoded Inst objects (from the AMD DSL) and produces a
+self-contained ELF binary that the AMDGPU runtime can load directly. The ELF contains:
+- .text section: the assembled machine code, padded to ISA alignment.
+- .rodata section: the AMDHSA kernel descriptor (vgpr/sgpr counts, LDS size, grid metadata).
+
+Register pressure (max VGPR/SGPR/AccVGPR) is scanned from the instruction stream, and the
+kernel descriptor fields are computed from the UOps metadata (buffer count, LDS size, etc.).
+This avoids depending on an external assembler or linker.
+"""
 import ctypes
 from tinygrad.helpers import ceildiv, round_up
 from tinygrad.uop.ops import UOp, Ops

@@ -1,3 +1,20 @@
+"""Range simplification and load-collapse passes for the codegen optimizer.
+
+These passes run *before* the BEAM/heuristic optimization step and are responsible for
+cleaning up and simplifying the iteration-range structure of a kernel:
+
+  pm_flatten_range   -- Canonicalise the ordering of RANGE sources on REDUCE/STORE/END nodes.
+  pm_simplify_ranges -- Merge adjacent ranges whose product simplifies (fewer div/mod ops),
+                        and shrink range bounds when gated INDEX patterns prove a tighter limit.
+  pm_split_ranges    -- Split a range into two when the range size is evenly divisible by a
+                        constant modulus found in the expression tree (enables better tiling).
+  pm_load_collapse   -- Eliminate REDUCE-over-load patterns that arise from tensor indexing
+                        (e.g. `a[b]` generates a reduce-sum over a gated load; this pass
+                        collapses it into a direct conditional load).
+
+The reduce-collapse logic works by symbolically checking whether a reduce body can be
+simplified to a closed-form expression (no remaining RANGE), and if so, substituting it.
+"""
 import itertools
 from typing import Callable
 from tinygrad.uop.ops import UOp, PatternMatcher, UPat, Ops, graph_rewrite, _substitute, range_start, AxisType

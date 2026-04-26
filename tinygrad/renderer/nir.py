@@ -1,3 +1,17 @@
+"""NIR (Mesa's intermediate representation) code generation.
+
+NIRRenderer builds a NIR shader in-memory using Mesa's C API (via ctypes) instead of
+emitting text. This lets tinygrad target any GPU driver that Mesa supports without
+writing a separate text-based renderer for each one.
+
+Concrete subclasses:
+- LVPRenderer: targets Lavapipe (Mesa's software Vulkan), used for CPU fallback on Linux.
+- NAKRenderer: targets NAK (Mesa's NVIDIA Vulkan compiler), an alternative to PTX.
+- IR3Renderer: targets Freedreno/Turnip (Qualcomm Adreno GPUs), with image texture support.
+
+The render() method walks UOps and calls nir_build_alu / nir_intrinsic_instr_create etc.
+to construct the shader, then serializes it to a base64 blob that the runtime deserializes.
+"""
 from typing import Callable, cast, Any
 from tinygrad.dtype import AddrSpace, DType, PtrDType, ImageDType, dtypes, truncate
 from tinygrad.helpers import DEBUG, OSX, unwrap, fromimport, Target

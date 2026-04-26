@@ -1,3 +1,19 @@
+"""Reduction operations mixin: operations that collapse dimensions.
+
+Defines operations that reduce one or more dimensions of a tensor:
+  - sum: add all elements along axis/axes
+  - prod: multiply all elements along axis/axes
+  - max / min: find maximum/minimum along axis/axes
+  - mean / var / std: statistical aggregations
+  - argmax / argmin: index of max/min element
+  - any / all: boolean reductions
+
+Reductions are one of the 4 primitive operation categories. In the UOp graph, they become
+REDUCE_AXIS nodes. During codegen, they're lowered to loops with accumulation.
+
+The dtype for accumulation can differ from the input dtype — e.g., sum of float16 may
+accumulate in float32 to avoid overflow (controlled by sum_acc_dtype).
+"""
 from typing import Self, Sequence
 from tinygrad.uop import Ops
 from tinygrad.dtype import DTypeLike, dtypes, sum_acc_dtype, to_dtype
@@ -7,6 +23,7 @@ from tinygrad.mixin.movement import MovementMixin
 
 
 class ReduceMixin(DTypeMixin, MovementMixin):
+  """Mixin providing reduction operations. Inherited by Tensor."""
   def _rop(self, op: Ops, axis: tuple[int, ...]) -> Self:
     raise NotImplementedError
 

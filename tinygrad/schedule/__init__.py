@@ -1,3 +1,17 @@
+"""Scheduler: converts a lazy UOp tensor graph into an ordered sequence of executable kernels.
+
+The scheduling pipeline has three main stages:
+  1. **Kernel graph construction** (via get_kernel_graph in rangeify.py): the tensor-level DAG is lowered into
+     concrete kernel operations -- movement ops become index math, reductions become RANGE loops, and fusion
+     boundaries are decided by the "realize" heuristic.
+  2. **Topological linearization** (create_schedule): the kernel DAG is topologically sorted, respecting
+     producer-consumer data dependencies and write-after-read hazards, to produce a flat LINEAR sequence.
+  3. **Buffer allocation and ExecItem creation** (complete_create_schedule_with_vars): symbolic variables are
+     bound, the memory planner suballocates temporaries, and each kernel is wrapped into an ExecItem for
+     the runtime to execute.
+
+Schedule caching (SCACHE) lets repeated subgraphs skip re-scheduling by keying on the UOp hash.
+"""
 import time, inspect
 from typing import cast
 from collections import deque
@@ -9,7 +23,8 @@ from tinygrad.engine.realize import ExecItem
 
 # **** schedule linearizer
 
-# unwrap VIEW/CAST/etc to find the actual data source (kernel output, buffer, or multi-device op)
+# unwrap VIEW/CAST/etc to find the actual data source (kernel output, buffer, or multi-device op).
+# needed because a kernel's inputs may be behind chains of RESHAPE/CAST/etc -- we want the producing AFTER/BUFFER.
 def _unwrap_src(s: UOp) -> UOp:
   while len(s.src) and s.op not in {Ops.AFTER, Ops.BUFFER, Ops.PARAM, Ops.MSELECT, Ops.MSTACK, Ops.BIND}: s = s.src[0]
   return s
@@ -22,6 +37,12 @@ def _split_after(after: UOp) -> tuple[tuple[UOp, ...], tuple[UOp, ...]]:
   return tuple(kernels), tuple(deps)
 
 def create_schedule(sched_sink:UOp) -> UOp:
+  """Topologically sort the kernel DAG into a flat LINEAR execution order.
+
+  Builds a dependency graph where edges go from producer kernels to consumer kernels (via AFTER nodes),
+  then performs Kahn's algorithm (BFS toposort) to produce a deterministic, dependency-respecting order.
+  Returns a LINEAR UOp whose src tuple is the ordered list of CALL UOps ready for execution.
+  """
   with cpu_profile(TracingKey("toposort sched_sink")):
     # build kernel dependency graph: edges from producer kernel to consumer kernels
     children: dict[UOp, list[UOp]] = {}
@@ -70,7 +91,12 @@ def create_schedule(sched_sink:UOp) -> UOp:
   return UOp(Ops.LINEAR, src=tuple(linearized))
 
 def linear_to_schedule(linear:UOp) -> list[ExecItem]:
-  """Convert a LINEAR UOp to a list of ExecItems."""
+  """Convert a LINEAR UOp into concrete ExecItems the runtime can dispatch.
+
+  Each src of the LINEAR is a CALL UOp containing an AST and buffer references.  This function resolves
+  BUFFER_VIEW subbuffers, wraps BEAM search when enabled, and fans out MultiBuffer kernels into per-device
+  ExecItems so the runtime sees only single-device work units.
+  """
   schedule: list[ExecItem] = []
   for si in linear.src:
     ast, buf_uops = si.src[0], si.src[1:]
@@ -122,6 +148,12 @@ pm_resolve_linear_call = PatternMatcher([
 schedule_cache: dict[bytes, UOp] = {}
 # ctx is just for DEBUG on inner
 def lower_sink_to_linear(function:UOp) -> UOp|None:
+  """Lower a single SINK (tensor function) into a LINEAR UOp of scheduled kernels.
+
+  This is the per-function entry point called by pm_schedule.  It checks the schedule cache first
+  (keyed on the UOp's content hash) to avoid redundant scheduling, then delegates to get_kernel_graph
+  + create_schedule for the actual work.  Debug output shows kernel count, timing, and cache status.
+  """
   st = time.perf_counter()
   if isinstance(function.arg, KernelInfo): return None
   cache_key = function.key
@@ -151,6 +183,15 @@ pm_schedule = PatternMatcher([
 
 @track_rewrites(lambda _,ret: f"Schedule {pluralize('Kernel', len(ret[0]))}")
 def complete_create_schedule_with_vars(big_sink:UOp) -> tuple[list[ExecItem], dict[str, int]]:
+  """Top-level entry point: from a SINK of all requested tensors, produce a fully-scheduled execution plan.
+
+  Pipeline:
+    1. pm_schedule lowers each tensor function (SINK) into a LINEAR of kernels (with schedule caching).
+    2. pm_resolve_linear_call resolves nested LINEAR/CALL references and allocates fresh BUFFERs.
+    3. Symbolic BIND variables are resolved to concrete values (var_vals).
+    4. memory_plan_rewrite suballocates internal temporaries via TLSF to reduce peak memory.
+    5. linear_to_schedule converts the final LINEAR into a list[ExecItem] for the runtime.
+  """
   # big_sink srcs are all the Tensors
   linear_call = graph_rewrite(big_sink, pm_schedule, name="schedule to linear", enter_calls=True)
 

@@ -1,3 +1,4 @@
+"""AMD GPU compiler using ROCm comgr (Code Object Manager) library to compile HIP/assembly to HSACO code objects."""
 import ctypes, hashlib, tempfile, subprocess, pathlib, shutil
 from tinygrad.helpers import system, getenv
 from tinygrad.runtime.autogen import comgr

@@ -1,3 +1,20 @@
+"""Multi-device scheduling: rewrites MULTI (sharded) tensors into per-device operations.
+
+When a Tensor is sharded across N devices (via .shard()), it is represented as a MULTI UOp whose src[0]
+is the per-shard data and whose `axis` attribute indicates which tensor axis is split.  This module's
+PatternMatcher (multi_pm) walks the graph and lowers every op that touches a MULTI tensor:
+
+  - **Elementwise ops**: applied independently per shard (after resolving axis mismatches via unshard+reshard).
+  - **Reductions on the shard axis**: each device reduces locally, then ALLREDUCE synchronizes across devices.
+  - **Movement ops** (reshape, permute, expand, pad, shrink, flip): the per-shard shape is adjusted and
+    the shard axis is tracked through the transformation.
+  - **COPY between single and multi-device**: MSTACK fans out copies to all devices (broadcast),
+    MSELECT picks one shard (gather-to-one).
+  - **STORE+AFTER (assign)**: applied per-shard to the underlying single-device buffer.
+
+After multi_pm runs, no MULTI ops remain -- the graph contains only single-device ops plus MSTACK/MSELECT
+nodes that the kernel splitter understands.
+"""
 from tinygrad.helpers import all_same, prod, getenv, ALLREDUCE_CAST
 from tinygrad.uop.ops import Ops, UOp, PatternMatcher, UPat, GroupOp, graph_rewrite, should_resolve_call
 from tinygrad.dtype import dtypes
@@ -42,6 +59,12 @@ if not getenv("LATE_ALLREDUCE", 1): replace_allreduce = _early_allreduce + repla
 # ***** multi functions *****
 
 def alu_multi(root:UOp):
+  """Lower an elementwise ALU op on MULTI tensors to per-shard ops.
+
+  All inputs must be on the same devices.  If an input isn't sharded (axis=None), it gets sharded to match.
+  If an input is sharded on a different axis, it's unsharded (allreduce) then re-sharded on the correct axis.
+  The ALU op is then applied to the per-shard data and wrapped back in MULTI.
+  """
   msrcs = root.src
   assert all_same([x.device for x in msrcs]), f"all buffers must have the same device {[x.device for x in msrcs]}"
   axis = root.axis
@@ -64,6 +87,10 @@ def alu_multi(root:UOp):
   return srcs[0].alu(root.op, *srcs[1:]).multi(axis)
 
 def reduce_multi(root:UOp, multi:UOp):
+  """Lower a reduction on a MULTI tensor.  Two cases:
+  - Reducing along the shard axis: each device reduces locally, then allreduce synchronizes the partial sums.
+  - Reducing along a non-shard axis: each device reduces independently (no communication needed).
+  """
   op, axis = root.arg
   if multi.axis is not None and multi.axis in axis:
     local = multi.src[0]._rop(op, axis)

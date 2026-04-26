@@ -1,3 +1,19 @@
+"""Device abstraction, Buffer management, and Compiled base class for all hardware backends.
+
+This is the hardware abstraction layer of tinygrad. It provides:
+  - _Device / Device: singleton that discovers and manages hardware backends (CPU, CUDA, Metal, AMD, etc.)
+  - Buffer: a chunk of device memory with dtype and size — the fundamental storage unit
+  - MultiBuffer: a buffer sharded across multiple devices for multi-GPU
+  - Compiled: base class that every hardware backend implements (provides Renderer, Compiler, Allocator)
+  - Allocator: memory allocation interface (with LRU caching via LRUAllocator)
+  - Compiler: compiles generated source code into executable programs
+
+The flow is: Device["CUDA"] -> returns a Compiled instance -> which has .allocator, .compiler, .renderer
+Buffer objects are created by the scheduler and hold the actual device memory. They're allocated lazily
+(only when realize() triggers execution) and freed when garbage collected.
+
+Key exports: Device, Buffer, MultiBuffer, Compiled, Compiler, Allocator
+"""
 from __future__ import annotations
 from dataclasses import dataclass, replace
 from collections import defaultdict
@@ -11,9 +27,26 @@ if TYPE_CHECKING: from tinygrad.renderer import Renderer
 
 # **************** Device ****************
 
+# priority order for auto-detection: Metal (macOS) > AMD > NV > CUDA > QCOM > OpenCL > CPU > DSP > WebGPU
 ALL_DEVICES = ["METAL", "AMD", "NV", "CUDA", "QCOM", "CL", "CPU", "DSP", "WEBGPU"]
 class _Device:
+  """Singleton that discovers, opens, and caches hardware backend instances.
+
+  Device["CUDA"] opens (or returns cached) the CUDA backend by dynamically importing
+  tinygrad.runtime.ops_cuda and finding the CUDADevice class. Each opened device is a
+  Compiled instance providing: .renderer (code generation), .compiler (compilation),
+  .allocator (memory), and optionally .graph (batched execution).
+
+  Auto-detection: tries ALL_DEVICES in priority order, returns the first one that works.
+  The result is cached in the DEV env var so child processes inherit the choice.
+
+  Usage:
+    Device.DEFAULT        # auto-detected device name (e.g., "METAL")
+    Device["CUDA"]        # get the CUDA backend (opens it if not already open)
+    Device["CUDA:1"]      # specific GPU index
+  """
   def __init__(self) -> None:
+    # discover all available backends by scanning ops_*.py files in tinygrad/runtime/
     self._devices = [x.stem[len("ops_"):].upper() for x in (pathlib.Path(__file__).parent/"runtime").iterdir() if x.stem.startswith("ops_")]
     self._opened_devices:set[str] = set()
   @functools.cache  # this class is a singleton, pylint: disable=method-cache-max-size-none
@@ -84,6 +117,11 @@ class BufferSpec:
   external_ptr: int|None = None
 
 class MultiBuffer:
+  """A buffer sharded across multiple devices for multi-GPU execution.
+
+  Used by Tensor.shard() to distribute data across GPUs. Wraps one Buffer per device.
+  All operations delegate to the individual per-device buffers.
+  """
   def __init__(self, device:tuple[str, ...], size:int, dtype:DType):
     self.bufs = [Buffer(d, size, dtype) for d in device]
   @property
@@ -97,6 +135,27 @@ class MultiBuffer:
   def __repr__(self): return f"<multibuf real:{self.is_allocated()} device:{tuple(x.device for x in self.bufs)} size:{self.size} dtype:{self.dtype}>"
 
 class Buffer:
+  """A chunk of device memory holding `size` elements of `dtype`.
+
+  Buffers are the fundamental storage unit in tinygrad. They are created lazily by the scheduler
+  and allocated only when a Tensor is realized. Buffers can be views of other buffers (via base+offset).
+
+  Lifecycle: __init__ (no memory) -> allocate() (device memory allocated) -> copyin/copyout -> deallocate()
+  Buffers are automatically deallocated when garbage collected (__del__).
+
+  The _buf attribute holds the actual device-specific memory handle (e.g., a CUdeviceptr for CUDA,
+  a MTLBuffer for Metal). It only exists after allocate() has been called.
+
+  Args:
+    device: Device string (e.g., "CUDA", "METAL", "CPU")
+    size: Number of elements
+    dtype: Element data type
+    opaque: Pre-existing device memory handle (skips allocation)
+    options: BufferSpec for special allocation flags (uncached, host-mapped, etc.)
+    initial_value: Bytes to copy into the buffer immediately after allocation
+    base: If this is a view, the underlying base buffer
+    offset: Byte offset into the base buffer (for views)
+  """
   profile_events:list[ProfileEvent] = []
   def __init__(self, device:str, size:int, dtype:DType, opaque:Any=None, options:BufferSpec|None=None, initial_value:bytes|None=None,
                uop_refcount=0, base:Buffer|None=None, offset:int=0, preallocate=False):
@@ -208,6 +267,13 @@ DeviceType = TypeVar('DeviceType', bound='Compiled')
 
 # TODO: size, dest, src are the same type. can we enforce this?
 class Allocator(Generic[DeviceType]):
+  """Base memory allocator interface. Every hardware backend provides an Allocator subclass.
+
+  Subclasses must implement _alloc and _free at minimum. Optionally implement _copyin, _copyout,
+  _as_buffer, _offset, and _transfer for data movement. LRUAllocator extends this with caching.
+
+  The alloc/free methods handle error wrapping; _alloc/_free are the backend-specific implementations.
+  """
   def __init__(self, dev:DeviceType, supports_copy_from_disk:bool=True, supports_transfer:bool=True):
     self.dev: DeviceType = dev
     self.default_buffer_spec: BufferSpec = BufferSpec()
@@ -258,6 +324,15 @@ class LRUAllocator(Allocator, Generic[DeviceType]):
 class CompileError(Exception): pass
 
 class Compiler:
+  """Base class for source-to-binary compilation. Each backend provides a Compiler subclass.
+
+  The default implementation is a no-op that just encodes the source as bytes (used when the
+  renderer produces ready-to-execute code like Metal shaders). Real compilers (NVRTC, clang,
+  ROCm comgr) override compile() to produce actual binary code.
+
+  Compiled results are disk-cached via SQLite (diskcache_get/put) so recompilation is avoided
+  across runs. Set CCACHE=0 to disable.
+  """
   def __init__(self, cachekey:str|None=None): self.cachekey = cachekey if CCACHE else None
   def compile(self, src:str) -> bytes: return src.encode()   # NOTE: empty compiler is the default
   def compile_cached(self, src:str) -> bytes:
@@ -269,6 +344,19 @@ class Compiler:
   def disassemble(self, lib:bytes): pass
 
 class Compiled:
+  """Base class for all hardware backends. Each device (CUDA, Metal, AMD, CPU, etc.) has a Compiled subclass.
+
+  A Compiled instance is what Device["CUDA"] returns. It bundles together everything needed
+  to execute code on a specific piece of hardware:
+    - allocator: manages device memory (alloc, free, copyin, copyout)
+    - renderer: generates target-specific code (PTX, WGSL, C, etc.) from UOp graphs
+    - compiler: compiles generated code to executable binaries
+    - runtime: loads and runs compiled programs on the device
+    - graph: optional batched execution (CUDA graphs, Metal command buffers)
+
+  The renderer is selected based on the DEV= target triple. Multiple renderers may be available
+  for a device (e.g., AMD has both native assembly and LLVM IR renderers).
+  """
   profile_events:list[ProfileEvent] = [ProfileDeviceEvent("CPU")] # NOTE: CPU is the default device.
 
   def __init__(self, device:str, allocator:Allocator, renderers:list[type[Renderer]], runtime, graph=None, arch=None):

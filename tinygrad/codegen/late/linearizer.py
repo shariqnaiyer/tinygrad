@@ -1,3 +1,25 @@
+"""Linearizer: topological sort of UOps with priority ordering for code emission.
+
+After all optimisation and lowering passes, the kernel is still a DAG of UOps.  The
+linearizer flattens it into a sequential instruction list suitable for rendering to source
+code.  The ordering matters for register pressure and cache locality.
+
+linearize() implements a priority-aware topological sort:
+  1. Assign each UOp a priority based on its op type and nesting depth (run_count):
+       - PARAM/DEFINE_VAR/DEFINE_LOCAL go first (declarations).
+       - LOAD is placed early (prefetch data).
+       - STORE is placed late (write-back only when values are ready).
+       - RANGE is placed late and END early, so that loop bodies stay compact.
+  2. Sort UOps by (run_count, priority) to get the "ideal" ordering.
+  3. Re-toposort using a min-heap that always pops the node closest to its ideal position,
+     respecting data dependencies.
+
+CFGContext + pm_add_control_flow handle ordering between sibling ranges that share a parent
+scope but have cross-dependencies (e.g. a store in one range feeds into a load in the next).
+It adds explicit control-flow edges so the linearizer respects the required order.
+
+pm_split_ends breaks multi-range END nodes into individual per-range ENDs (one RANGE per END).
+"""
 import heapq
 from typing import Any
 from collections import defaultdict
@@ -5,6 +27,7 @@ from tinygrad.uop.ops import PatternMatcher, UOp, Ops, UPat, multirange_str
 from tinygrad.helpers import prod, getenv, TUPLE_ORDER
 
 def linearize(sink:UOp) -> list[UOp]:
+  """Flatten the UOp DAG into a priority-ordered instruction list for code emission."""
   # this is a toposort with priority
   lst = list(sink.toposort())
   out_degree:defaultdict[UOp, int] = defaultdict(int)

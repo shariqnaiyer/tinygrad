@@ -1,3 +1,12 @@
+"""Z3-based bounds checking and validation for UOp graphs.
+
+Uses the Z3 SMT solver to verify that buffer indices are within bounds and that
+integer operations don't overflow. This is the most rigorous validation layer —
+it can prove mathematically that an index expression is always in-bounds.
+
+Enabled with CHECK_OOB=1 (off by default because Z3 is slow).
+Requires z3-solver >= 4.12.4.
+"""
 from typing import Callable, cast
 from tinygrad.uop.ops import PatternMatcher, UPat, GroupOp, Ops, UOp, python_alu
 from tinygrad.dtype import dtypes, Invalid

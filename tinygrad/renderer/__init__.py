@@ -1,3 +1,12 @@
+"""Renderer base classes and kernel metadata.
+
+This module defines the core abstractions for tinygrad's code generation pipeline:
+- Estimates: tracks FLOPs and memory access costs so the scheduler can compare kernel plans.
+- ProgramSpec: holds everything needed to launch a compiled kernel (source, sizes, buffer bindings).
+- Renderer: base class that every backend code generator (C, PTX, WGSL, etc.) inherits from.
+
+The flow is: UOps graph -> Renderer.render() -> source string -> Compiler -> executable.
+"""
 from __future__ import annotations
 from typing import Callable, cast
 import functools
@@ -11,6 +20,16 @@ from tinygrad.device import Compiler
 
 @dataclass(frozen=True)
 class Estimates:
+  """Cost model for a single kernel, used by the scheduler to pick the best fusion plan.
+
+  Three metrics capture different aspects of performance:
+  - ops: total arithmetic operations (FLOPs) -- measures compute cost.
+  - lds: total bytes touched by loads/stores (counts re-reads) -- measures bandwidth pressure.
+  - mem: unique bytes accessed (re-reads counted once, capped at buffer size) -- measures working set.
+
+  Estimates are computed statically from the UOps graph via from_uops(), walking the IR and
+  multiplying element costs by the enclosing RANGE/SPECIAL loop trip counts.
+  """
   # number of FLOPS used in the Kernel
   ops:sint = 0
   # bytes accessed in loads and stores
@@ -63,6 +82,16 @@ class Estimates:
 
 @dataclass
 class ProgramSpec:
+  """Everything needed to launch one compiled kernel on a device.
+
+  Created by ProgramSpec.from_uop() which walks a PROGRAM UOp to extract:
+  - name/src: the kernel function name and its source code string.
+  - global_size/local_size: the GPU grid and workgroup dimensions.
+  - globals/outs/ins: which buffer indices are accessed and in which direction.
+  - vars: symbolic variables (e.g. batch size) that are resolved at launch time.
+
+  The ast field stores the original SINK UOp so the method cache can deduplicate identical kernels.
+  """
   name:str
   src:str
   device:str
@@ -131,6 +160,18 @@ class ProgramSpec:
                        sorted(_vars, key=lambda v: v.arg), sorted(dedup(_globals)), sorted(dedup(outs)), sorted(dedup(ins)))
 
 class Renderer:
+  """Base class for all backend code generators.
+
+  Each backend (Clang, PTX, WGSL, LLVM IR, etc.) subclasses Renderer and overrides render()
+  to convert a list of UOps into a source string the corresponding Compiler can consume.
+
+  Class attributes describe hardware constraints the optimizer must respect:
+  - has_local/has_shared: whether the device supports workgroups and shared memory.
+  - global_max/local_max: per-dimension caps on grid and workgroup sizes.
+  - shared_max: bytes of shared memory available per workgroup.
+  - tensor_cores: available matrix multiply hardware (WMMA/AMX).
+  - pre_matcher/extra_matcher: PatternMatcher rewrites applied before/after lowering.
+  """
   target: Target
   suffix: str = ""
   # TODO: make this generic with a list of supported types

@@ -1,3 +1,13 @@
+"""LLVM IR text generation for CPU and AMD GPU backends.
+
+LLVMRenderer is the base that converts UOps into LLVM IR text (not bitcode). Two concrete subclasses:
+- CPULLVMRenderer: targets the host CPU, compiled via LLVM's ORC JIT. Supports Apple AMX tensor cores.
+- AMDLLVMRenderer: targets AMD GPUs, compiled via LLVM's AMDGPU backend. Emits amdgpu_kernel calling
+  convention, AMDGCN intrinsics for workitem IDs, and MFMA/WMMA instructions for tensor cores.
+
+Using LLVM IR instead of C gives access to target-specific intrinsics (e.g. llvm.amdgcn.mfma)
+and avoids the overhead of a full C compiler frontend.
+"""
 from typing import cast
 import math, struct, sys
 from tinygrad.codegen.opt import tc

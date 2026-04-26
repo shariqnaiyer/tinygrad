@@ -1,3 +1,24 @@
+"""Hand-coded kernel optimization heuristics -- the default optimizer when BEAM is not enabled.
+
+hand_coded_optimizations() inspects the kernel shape, buffer access patterns, and renderer
+capabilities, then applies a sequence of Opt actions in priority order:
+
+  1. Tensor cores (TC)     -- if the device has WMMA support and the kernel is a matmul-shaped
+                              reduce, try to apply a tensor-core opt first and add upcasts for M/N.
+  2. Image upcasts         -- for OpenCL image buffers, upcast the float4-stride axis early.
+  3. Matrix-vector (MV)    -- detect matvec patterns (one reduce, one of the two bufs has all
+                              reduce ranges) and apply GROUP + LOCAL + UPCAST.
+  4. Group reduce          -- if the output is small relative to the reduction, use GROUPTOP
+                              to split the reduce across local threads.
+  5. Masked upcasts        -- upcast small dims with WHERE gates (e.g. from Tensor.stack).
+  6. Stride-based upcasts  -- upcast non-reduce axes that have stride-0 in some buffer (broadcast
+                              dims benefit from register reuse).
+  7. Reduce unrolling      -- if the innermost reduce dim is small, unroll it.
+  8. Local tiling           -- assign GLOBAL/LOOP axes to LOCAL with sizes up to 128 total threads.
+  9. CPU threading          -- on CPU, split a LOOP axis into THREAD for multicore execution.
+
+Each step is wrapped in try/except KernelOptError so a failed heuristic is simply skipped.
+"""
 import itertools
 from tinygrad.codegen.opt import Opt, OptOps, KernelOptError
 from tinygrad.helpers import getenv, DEBUG, prod, NOLOCALS, TC_OPT, TC_SELECT, USE_TC, AMX, IMAGE

@@ -1,3 +1,20 @@
+"""Post-range optimization: the Scheduler class and apply_opts() entry point.
+
+The Scheduler wraps a kernel AST together with its Renderer and provides the machinery
+to apply Opt actions.  It is the bridge between the high-level optimiser (heuristic or
+BEAM search) and the low-level kernel graph:
+
+  - Scheduler.apply_opt(Opt) validates the opt, then mutates self.ast by splitting/renaming
+    RANGE UOps (shift_to) or substituting tensor-core WMMA patterns (_apply_tc_opt).
+  - Scheduler.get_optimized_ast() finalises the AST by attaching a KernelInfo (name, opts
+    applied, kernel shape) and tagging it so downstream passes know optimisation is done.
+
+apply_opts() is called from full_rewrite_to_sink() and dispatches to one of:
+  1. Explicit opts_to_apply already recorded on the AST's KernelInfo (replay path).
+  2. BEAM search (beam >= 1) -- see search.py.
+  3. hand_coded_optimizations (default) -- see heuristic.py.
+  4. No optimisation (NOOPT=1 or already optimised).
+"""
 from __future__ import annotations
 import math, itertools
 from collections import defaultdict
@@ -15,6 +32,13 @@ from tinygrad.renderer import Renderer
 remove_tags = PatternMatcher([(UPat(GroupOp.All, name="x"), lambda x: x.replace(tag=None) if x.tag is not None else None)])
 
 class Scheduler:
+  """Mutable wrapper around a kernel AST that exposes the axis shape and lets optimisers apply Opt actions.
+
+  The optimiser (heuristic or BEAM) works by calling apply_opt() repeatedly on a Scheduler.
+  Each call mutates self.ast by substituting RANGE UOps (via shift_to) to reshape the kernel's
+  iteration space.  After all opts are applied, get_optimized_ast() stamps a KernelInfo and
+  returns the finalised AST for downstream lowering.
+  """
   def __init__(self, ast:UOp, ren:Renderer):
     self.ast, self.ren = ast, ren
     self.dont_use_locals = self.ast.arg.dont_use_locals if self.ast.arg is not None else False
@@ -335,6 +359,7 @@ def bufs_from_ast(ast:UOp, dname:str) -> list[Buffer]:
   return [Buffer(dname, x.ptrdtype.size, x.dtype.base) for x in glbls]
 
 def apply_opts(ast:UOp, ren:Renderer, beam:int=0) -> UOp:
+  """Orchestrate kernel optimisation: dispatch to explicit opts, BEAM search, or hand-coded heuristics."""
   if ast.tag is not None: return ast
   k = Scheduler(ast, ren)
   k.convert_loop_to_global()

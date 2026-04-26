@@ -1,3 +1,14 @@
+"""NVIDIA direct driver backend (NV). Bypasses the CUDA runtime entirely, talking directly to the kernel-mode driver
+via ioctl (or the NVK/Mesa interface on open-source stacks). This enables Hardware Command Queue (HCQ) submission for
+lower latency and finer-grained control over GPU scheduling, memory mapping, and synchronization.
+
+Key classes:
+  NVDevice        -- HCQ-compiled device that sets up GPU channels, page tables, and GPFIFO rings.
+  NVComputeQueue  -- HWQueue that builds NV method-based command buffers and submits via GPFIFO.
+  NVCopyQueue     -- Dedicated copy engine queue for DMA transfers.
+  NVProgram       -- Loads ELF binaries and builds QMD (Queue Meta Data) descriptors for kernel dispatch.
+  QMD             -- Bitfield accessor for NVIDIA's compute dispatch descriptor (v03/v05).
+"""
 from __future__ import annotations
 import os, ctypes, contextlib, re, functools, mmap, struct, array, sys, weakref
 assert sys.platform != 'win32'
@@ -576,6 +587,8 @@ class PCIIface(PCIIfaceBase):
     if self.dev_impl.is_err_state: raise RuntimeError("Device fault detected")
 
 class NVDevice(HCQCompiled[NVSignal]):
+  """Direct NVIDIA GPU device using kernel-mode RM (Resource Manager) ioctls or NVK/Mesa. Sets up GPU virtual address
+  spaces, GPFIFO channels for compute and copy engines, and manages device memory via the HCQ allocator."""
   def is_nvd(self) -> bool: return isinstance(self.iface, PCIIface)
 
   def __init__(self, device:str=""):

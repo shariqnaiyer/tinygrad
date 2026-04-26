@@ -1,3 +1,8 @@
+"""Hardware Command Queue (HCQ) abstraction layer.
+
+Unified interface for direct hardware access used by NV, AMD, and QCOM backends. Provides HCQCompiled (device base class),
+HCQAllocator (memory management), HCQSignal (cross-device synchronization), HWQueue (command submission), and HCQGraph (batched execution).
+"""
 from __future__ import annotations
 from typing import cast, Callable, Type, TypeVar, Generic, Any
 import contextlib, decimal, statistics, time, ctypes, array, os, struct, collections, functools, itertools
@@ -239,6 +244,7 @@ class HWQueue(Generic[SignalType, HCQDeviceType, ProgramType, ArgsStateType]):
   def _submit(self, dev:HCQDeviceType): raise NotImplementedError("need _submit")
 
 class HCQSignal(Generic[HCQDeviceType]):
+  """GPU/device synchronization primitive backed by a shared memory location. Supports cross-device signaling and timestamp collection."""
   def __init__(self, base_buf:HCQBuffer, value:int=0, owner:HCQDeviceType|None=None, is_timeline:bool=False, timestamp_divider=1000, virt=False):
     self.base_buf, self.owner, self.is_timeline = base_buf, owner, is_timeline
     self.should_return = isinstance(self.base_buf.va_addr, int) and self.owner is not None and not virt

@@ -1,3 +1,4 @@
+"""Low-level C interop helpers: ioctl wrappers (_IO/_IOW/_IOR/_IOWR), ctypes-based struct/union definitions, and shared library loading."""
 from __future__ import annotations
 import ctypes, functools, os, pathlib, re, sys, sysconfig
 from tinygrad.helpers import ceildiv, getenv, DEBUG, OSX, WIN

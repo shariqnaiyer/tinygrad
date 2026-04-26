@@ -1,3 +1,16 @@
+"""AMD direct driver backend. Bypasses the HIP/ROCm runtime and drives AMDGPU hardware through a userspace driver
+(AM) or KFD ioctls, enabling Hardware Command Queue (HCQ) submission for lower-latency kernel dispatch. Constructs
+PM4 command packets to program shader registers, manage cache coherency, and submit work to compute queues.
+
+Supports GCN/RDNA/CDNA architectures from gfx942 onward. Includes optional SQTT (Shader Queue Thread Trace) and PMC
+(Performance Monitor Counter) profiling when VIZ >= 2.
+
+Key classes:
+  AMDDevice        -- HCQ-compiled device managing compute queues, SDMA engines, and scratch memory.
+  AMDComputeQueue  -- HWQueue that builds PM4 command streams for compute dispatch.
+  AMDCopyQueue     -- SDMA-based copy engine for DMA transfers.
+  AMDProgram       -- Loads ELF kernel binaries and configures AQL-style dispatch descriptors.
+"""
 from __future__ import annotations
 from typing import cast
 import os, ctypes, struct, hashlib, functools, importlib, mmap, errno, array, contextlib, sys, weakref, itertools, collections, atexit
@@ -942,6 +955,8 @@ class USBIface(PCIIface):
   def sleep(self, timeout): pass
 
 class AMDDevice(HCQCompiled):
+  """Direct AMD GPU device using the AM userspace driver or KFD ioctls. Configures compute/SDMA queues, scratch
+  memory, and shader register state. Supports gfx942+ architectures with multi-XCC awareness."""
   def is_am(self) -> bool: return isinstance(self.iface, (PCIIface, USBIface))
   def is_usb(self) -> bool: return isinstance(self.iface, USBIface)
 

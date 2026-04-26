@@ -1,3 +1,13 @@
+"""Apple Metal runtime backend for macOS/iOS GPUs. Compiles Metal Shading Language source via the private
+MTLCodeGenService API (bypassing the full Xcode toolchain), then dispatches compute kernels through Metal command
+buffers. Supports GPU family probing (Apple7/M1 through Apple9/M3+) for feature selection.
+
+Key classes:
+  MetalDevice   -- Compiled device wrapping an MTLDevice and its command queue.
+  MetalCompiler -- Invokes MTLCodeGenServiceBuildRequest to compile MSL source to MTLB (Metal library binary).
+  MetalProgram  -- Creates a compute pipeline from compiled MTLB and encodes dispatches into command buffers.
+  MetalAllocator -- LRU allocator using MTLBuffer, with shared-memory support for CPU<->GPU transfers.
+"""
 import subprocess, pathlib, struct, ctypes, tempfile, functools, decimal, platform
 from tinygrad.helpers import prod, to_mv, round_up, cache_dir, PROFILE, ProfileRangeEvent, cpu_profile, unwrap, suppress_finalizing
 import tinygrad.runtime.support.objc as objc
@@ -29,6 +39,8 @@ def error_check(error: metal.NSError, error_constructor: type[Exception] = Runti
   raise error_constructor(from_ns_str(error.localizedDescription().retained()))
 
 class MetalDevice(Compiled):
+  """Apple Metal device. Wraps the system default MTLDevice, creates a command queue, and probes GPU family for
+  feature detection (M1=Apple7, M2=Apple8, M3/M4=Apple9). Graph execution is disabled under paravirtualized Metal."""
   def __init__(self, device:str):
     self.sysdevice = metal.MTLCreateSystemDefaultDevice()
     self.mtl_queue = self.sysdevice.newCommandQueueWithMaxCommandBufferCount(1024)

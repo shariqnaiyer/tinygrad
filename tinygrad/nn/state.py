@@ -1,3 +1,16 @@
+"""State dict serialization and model weight loading.
+
+Supports three serialization formats:
+  - SafeTensors (.safetensor): the preferred format -- a flat header + contiguous tensor data layout, no pickle.
+  - GGUF (.gguf): quantized model format from llama.cpp, supports many quantization types (Q4_0, Q4_K, Q6_K, etc.).
+  - PyTorch (.pth): legacy support via torch_load, handles zip, tar, and raw pickle formats.
+
+Core utilities:
+  get_state_dict(obj) -- recursively walks any Python object to find all Tensor attributes and returns them as a flat dict.
+  get_parameters(obj) -- shorthand that returns just the list of Tensors (values of the state dict).
+  load_state_dict(model, state_dict) -- assigns loaded tensors into a model, handling shape checks, device placement, and sharding.
+  safe_save / safe_load -- read/write SafeTensors files, operating on Tensors (can be disk-backed for zero-copy).
+"""
 import json, pathlib, zipfile, pickle, tarfile, struct, functools, io, zlib
 from collections import OrderedDict
 from typing import Any, Callable, BinaryIO, Iterable, cast
@@ -6,6 +19,7 @@ from tinygrad.dtype import dtypes
 from tinygrad.helpers import prod, argsort, DEBUG, Timing, CI, GlobalCounters, tqdm, round_up, T, strides_for_shape
 
 class TensorIO(io.RawIOBase, BinaryIO):
+  """Adapts a 1D uint8 Tensor into a seekable BinaryIO stream so stdlib file-format parsers (zipfile, tarfile, pickle) can read from it."""
   def __init__(self, t: Tensor):
     if t.ndim != 1 or t.dtype != dtypes.uint8: raise ValueError("Tensor must be 1d and of dtype uint8!")
     self._position, self._tensor = 0, t
@@ -35,6 +49,7 @@ safe_dtypes = {"BOOL":dtypes.bool, "I8":dtypes.int8, "U8":dtypes.uint8, "I16":dt
 inverse_safe_dtypes = {v:k for k,v in safe_dtypes.items()}
 
 def accept_filename(func: Callable[[Tensor], T]) -> Callable[[Tensor|str|pathlib.Path], T]:
+  """Decorator that lets load functions accept a filename string or Path in addition to a Tensor (wraps with disk-backed Tensor)."""
   @functools.wraps(func)
   def wrapper(fn: Tensor|str|pathlib.Path) -> T: return func(Tensor(pathlib.Path(fn)) if not isinstance(fn, Tensor) else fn)
   return wrapper
@@ -110,7 +125,8 @@ def get_state_dict(obj, prefix:str='', tensor_type=Tensor) -> dict[str, Tensor]:
   return state_dict
 
 def get_parameters(obj) -> list[Tensor]:
-  """
+  """Returns a flat list of all Tensors found in obj (convenience wrapper around get_state_dict).
+
   ```python exec="true" source="above" session="tensor" result="python"
   class Net:
     def __init__(self):
@@ -164,6 +180,7 @@ def load_state_dict(model, state_dict:dict[str, Tensor], strict=True, verbose=Tr
 
 @accept_filename
 def zip_extract(t: Tensor) -> dict[str, Tensor]:
+  """Extracts all files from a zip archive backed by a Tensor, returning {filename: tensor_slice}. Supports STORED and DEFLATED."""
   files: dict[str, Tensor] = {}
   with zipfile.ZipFile(TensorIO(t), "r") as myzip:
     # sadly, the extra length needs to be read from the local header of each file.

@@ -1,3 +1,21 @@
+"""Symbolic simplification and constant folding for UOp graphs.
+
+This is the algebraic optimizer — it applies mathematical identities to simplify UOp expressions:
+  - Constant folding: 2+3 -> 5, x*1 -> x, x+0 -> x
+  - Algebraic identities: x*0 -> 0, x//1 -> x, x%1 -> 0
+  - Strength reduction: x*2 -> x<<1
+  - Boolean simplification: x<0 when x is always non-negative -> False
+  - GEP pushing: push vector element extraction through arithmetic
+  - Pattern-based rewrites for complex expressions
+
+The simplification rules are organized into PatternMatcher groups that are applied during
+different phases of compilation. The key ones are:
+  - sym / symbolic_simple: basic algebraic identities
+  - symbolic: full symbolic simplification
+  - gep_pushing: push GEP through ops to enable vectorization
+
+These rules are applied via graph_rewrite() throughout the codegen pipeline.
+"""
 # all of symbolic lives here now
 import math, struct
 from collections import defaultdict

@@ -1,3 +1,15 @@
+"""Codegen orchestration: the multi-pass pipeline that lowers a kernel UOp graph into executable code.
+
+The pipeline (driven by full_rewrite_to_sink) proceeds in these major phases:
+  1. Preprocessing   -- movement ops, syntactic sugar, store-range insertion.
+  2. Optimization    -- load collapse, range splitting/simplification, then BEAM or heuristic opts (via apply_opts).
+  3. Expansion       -- symbolic simplification, UNROLL/UPCAST expansion, local-buffer allocation.
+  4. Devectorization -- REDUCE lowering, GPU-dim mapping, LOAD insertion, vector splitting, image handling.
+  5. Decomposition   -- type decompositions, transcendental rewrites, renderer-specific final rewrites.
+  6. Linearization   -- topological sort into a flat instruction list, then control-flow injection.
+
+After full_rewrite_to_sink, pm_to_program drives linearization, rendering to source, and compilation.
+"""
 from typing import cast
 from dataclasses import replace
 import itertools
@@ -22,6 +34,37 @@ from tinygrad.codegen.late.linearizer import CFGContext, pm_split_ends, pm_add_c
 from tinygrad.renderer.amd.elf import do_assemble_amd
 
 def full_rewrite_to_sink(sink:UOp, ren:Renderer|None=None, optimize:bool=True, beam:int=0) -> UOp:
+  """Lower a kernel-level SINK UOp through all codegen passes and return a device-ready SINK.
+
+  This is the main entry point for tinygrad's code generation pipeline.  It receives the
+  high-level kernel graph (ops + ranges) and applies a series of graph_rewrite passes that
+  progressively lower and optimize it.
+
+  Pass overview (in order):
+    - early movement ops    -- expand movement ops, syntactic sugar, store-range insertion
+    - load collapse         -- fold tensor-indexed loads into simpler forms
+    - split / simplify ranges -- merge or split iteration ranges for better tiling
+    - apply_opts            -- BEAM search or hand-coded heuristics (UPCAST, LOCAL, TC, etc.)
+    - expander              -- expand UNROLL/UPCAST ranges into vectorized ops
+    - add local buffers     -- insert shared-memory buffers for GROUP_REDUCE
+    - remove_reduce         -- lower REDUCE into DEFINE_ACC + accumulate loops
+    - add gpudims           -- replace RANGE loops with GPU thread/block indices (SPECIAL)
+    - add loads             -- insert explicit LOAD ops for non-pointer INDEX results
+    - devectorize           -- split wide vectors into hardware-supported widths
+    - lower index dtypes    -- concretize index dtype (weakint -> int)
+    - decompositions        -- lower unsupported ALU ops; transcendental approximations
+    - final rewrite         -- renderer-specific patterns, END splitting
+    - add control flow      -- inject ordering edges between sibling ranges
+
+  Args:
+    sink:     Ops.SINK rooted kernel UOp graph (must have KernelInfo on .arg).
+    ren:      Renderer describing the target device capabilities.
+    optimize: If False, skip the optimization passes (used for pre-optimized / tagged ASTs).
+    beam:     BEAM search width.  0 means use heuristics instead.
+
+  Returns:
+    A fully-lowered SINK UOp ready for linearization and rendering.
+  """
   if ren is None: ren = Renderer(Target())
 
   if VIZ: graph_rewrite(sink, PatternMatcher([]), name="View Base AST")
@@ -114,6 +157,7 @@ pm_linearize_cleanups = PatternMatcher([
 ])
 
 # requires lst be toposorted. like graph rewrite, but for lines
+# operates on a flat instruction list rather than a graph -- each UOp is rewritten to (replacement, output_lines)
 def line_rewrite(lst:list[UOp], pm:PatternMatcher) -> list[UOp]:
   newlst = []
   replaced: dict[UOp, UOp] = {}

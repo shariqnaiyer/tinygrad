@@ -1,3 +1,13 @@
+"""OpenCL runtime backend. Targets any GPU (or accelerator) with an OpenCL ICD driver, making it the most portable
+GPU backend. Compiles kernels from OpenCL C source at runtime via clBuildProgram, caches the resulting binaries, and
+dispatches via clEnqueueNDRangeKernel. Supports image types for texture-backed tensors.
+
+Key classes:
+  CLDevice    -- Compiled device that enumerates OpenCL platforms/devices and creates a command queue.
+  CLCompiler  -- Wraps clCreateProgramWithSource / clBuildProgram for runtime compilation.
+  CLProgram   -- Manages an OpenCL kernel object and handles argument binding and dispatch.
+  CLAllocator -- LRU allocator backed by clCreateBuffer.
+"""
 from __future__ import annotations
 from typing import cast
 import ctypes, functools, hashlib
@@ -91,6 +101,9 @@ class CLAllocator(LRUAllocator['CLDevice']):
     self.dev.synchronize()
 
 class CLDevice(Compiled):
+  """OpenCL device. Enumerates platforms and devices at first init (preferring GPU type), creates a context and
+  command queue, and detects vendor-specific features (e.g., Intel subgroups). The device_ids class variable is
+  shared across all instances to avoid redundant platform enumeration."""
   device_ids = None                 # this is global and only initted once
   def __init__(self, device:str=""):
     if CLDevice.device_ids is None:

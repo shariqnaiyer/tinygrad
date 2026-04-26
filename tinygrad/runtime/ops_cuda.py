@@ -1,3 +1,11 @@
+"""NVIDIA CUDA runtime backend. Uses the CUDA Driver API (libcuda / cuXxx functions) for context creation, memory
+management, and kernel launches. Kernels are compiled to PTX and loaded at runtime via cuModuleLoadData / NVRTC.
+
+Key classes:
+  CUDADevice    -- Compiled device wrapping a CUcontext, with peer-access negotiation for multi-GPU setups.
+  CUDAProgram   -- Loads a PTX/cubin module and extracts a kernel function for cuLaunchKernel dispatch.
+  CUDAAllocator -- LRU allocator backed by cuMemAlloc; supports host-pinned memory and peer transfers.
+"""
 from __future__ import annotations
 import ctypes, functools
 from tinygrad.helpers import DEBUG, getenv, mv_address, suppress_finalizing
@@ -94,6 +102,8 @@ class CUDAAllocator(LRUAllocator['CUDADevice']):
   def _offset(self, buf, size:int, offset:int): return cuda.CUdeviceptr_v2(buf.value + offset)
 
 class CUDADevice(Compiled):
+  """CUDA device backed by the Driver API. Manages a CUcontext per GPU and negotiates peer-to-peer access between
+  multiple CUDA devices for direct GPU-GPU memory transfers."""
   devices: list[CUDADevice] = []
   peer_access = False
 

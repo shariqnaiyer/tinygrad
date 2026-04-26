@@ -1,3 +1,13 @@
+"""CPU runtime backend. Compiles C or LLVM IR to native machine code (via clang/LLVM JIT or LVP), writes it into
+executable memory (mmap with MAP_JIT on Apple Silicon), and invokes it through ctypes. Multi-threaded execution is
+supported via a CPUWorker thread pool, where each worker pulls commands from a shared queue.
+
+Key classes:
+  CPUDevice    -- HCQ-based device that spawns worker threads and selects among ClangJIT, CPULLVM, or LVP renderers.
+  CPUProgram   -- Loads compiled machine code into executable memory and exposes it as a ctypes callable.
+  CPUAllocator -- Allocates anonymous mmap'd buffers for host-side data.
+  CPUComputeQueue -- HWQueue implementation that dispatches work to the CPUWorker thread pool.
+"""
 from __future__ import annotations
 import platform, sys, ctypes, functools, time, mmap, threading, queue
 from tinygrad.helpers import to_mv, OSX, WIN, mv_address, suppress_finalizing, unwrap, data64_le
@@ -133,6 +143,8 @@ class CPUAllocator(HCQAllocator):
     if buf.view is None or not isinstance(buf.view, MMIOInterface): raise RuntimeError("Cannot map buffer without view to cpu")
 
 class CPUDevice(HCQCompiled):
+  """HCQ device for CPU execution. Spawns a CPUWorker thread pool and selects among ClangJIT, CPULLVM, or LVP
+  renderers depending on availability. Uses anonymous mmap for buffer allocation and ctypes for kernel invocation."""
   def __init__(self, device:str=""):
     self.tasks:queue.Queue = queue.Queue()
     CPUWorker(self, self.tasks, thread_id=0).start()

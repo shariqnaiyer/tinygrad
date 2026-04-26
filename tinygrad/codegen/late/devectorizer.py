@@ -1,3 +1,36 @@
+"""Devectorizer and load/store optimisation passes.
+
+This module runs in the "late" lowering phase, after expansion and before final rendering.
+It converts the abstract, width-agnostic UOp graph into one that matches the hardware's
+actual vector and memory capabilities.
+
+Major pattern matchers exported:
+
+  load_store_folding    -- Group scalar INDEX ops into wider vector loads/stores (PTRCAT/VCAT).
+                           Also handles GEP-through-LOAD/STORE and image buffer expansion.
+
+  load_store_indexing   -- Simplify INDEX validity masks for image buffers by proving that
+                           certain validity conditions are always true given the index range.
+
+  devectorize           -- Break vectorized ALU, CAST, WMMA ops into scalar ops wrapped in
+                           VECTORIZE when the hardware doesn't support the wide type natively.
+                           Also scalarizes DEFINE_LOCAL/DEFINE_REG buffer accesses.
+
+  correct_load_store    -- Split loads/stores into hardware-legal widths (float4, float2, etc.)
+                           based on renderer.supports_float4 and buffer dtype.  Also converts
+                           image dtype buffers to the (x, y) indexed form the GPU expects.
+
+  pm_reduce             -- Lower REDUCE UOps into explicit DEFINE_REG accumulators with
+                           accumulate-in-loop patterns.  Merges ENDs that share the same range.
+
+  pm_add_loads          -- Insert explicit LOAD ops after INDEX for non-pointer results.
+
+  pm_render             -- Final scalar/vector cleanup for the renderer: expand CONST/VCONST
+                           into VECTORIZE, resolve GEP, attach alt values to masked loads,
+                           and fold WHERE-on-gated-load into the load's alt value.
+
+  pm_make_images        -- Promote eligible PARAM buffers to image types on supported devices.
+"""
 from typing import Any, cast
 import functools, itertools
 from collections import defaultdict
@@ -309,6 +342,7 @@ def horizontal_reduce(inp:UOp, out_dtype:DType) -> list[UOp]:
   return [inp]
 
 def reduce_to_acc(ctx:ReduceContext, red:UOp):
+  """Lower a REDUCE UOp into a DEFINE_REG accumulator with an explicit accumulate loop and END."""
   inp, reduce_range = red.src[0], red.src[1:]
   lst = horizontal_reduce(inp, red.dtype)
   assert all(x.dtype == red.dtype for x in lst), f"horizontal reduction mismatch {lst[0].dtype} != {red.dtype}"

@@ -1,3 +1,15 @@
+"""Pure Python reference backend. Interprets the UOp IR directly without any compilation step, executing each
+micro-op in a loop with plain Python operations. Serves as the ground-truth implementation for testing correctness
+of all other backends, including tensor core (WMMA) emulation for Metal, AMD, and CUDA layouts.
+
+Not intended for performance -- useful for debugging kernels and validating UOp semantics.
+
+Key classes:
+  PythonDevice   -- Compiled device with no real hardware; uses PythonAllocator (bytearray-backed).
+  PythonProgram  -- Deserializes a pickled UOp list and interprets it on __call__.
+  PythonRenderer -- Renderer that serializes UOps to a pickle blob instead of generating code.
+  PythonCompiler -- No-op compiler (source == binary, since the "binary" is just a pickle).
+"""
 # pylint: disable=cell-var-from-loop
 # a python uops emulator
 # works to test the tensor cores, and all the uops in general
@@ -232,5 +244,7 @@ class PythonAllocator(Allocator['PythonDevice']):
   def _copyout(self, dest:memoryview, src): dest[:] = src
 
 class PythonDevice(Compiled):
+  """Pure-Python interpreted device. No real hardware -- uses bytearray-backed buffers and interprets pickled UOps
+  directly. Primarily used for correctness testing and as a reference implementation of the UOp semantics."""
   def __init__(self, device:str):
     super().__init__(device, PythonAllocator(self), [PythonRenderer], PythonProgram)

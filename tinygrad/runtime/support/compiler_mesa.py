@@ -1,3 +1,4 @@
+"""Mesa/LVP (Lavapipe) compiler: deserializes NIR shaders and lowers them to native code via LLVM and gallivm."""
 import base64, ctypes, pathlib, tempfile, hashlib
 from tinygrad.device import Compiler
 from tinygrad.helpers import cpu_objdump, system, data64

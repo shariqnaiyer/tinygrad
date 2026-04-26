@@ -1,3 +1,8 @@
+"""ONNX model import: loads .onnx protobuf files and converts the operator graph into tinygrad Tensor operations.
+
+Includes a minimal protobuf decoder (no external protobuf dependency), the full ONNX opset mapping, and graph-level
+execution logic (OnnxRunner). Supports opset versions up to 24 and select Microsoft contrib ops.
+"""
 # pylint: disable=possibly-unused-variable
 from typing import Any, Sequence, cast, Literal, NamedTuple, Generator
 import dataclasses, functools, io, math, types, warnings, pathlib, sys, os, struct, enum

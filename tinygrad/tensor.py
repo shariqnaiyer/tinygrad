@@ -1,4 +1,34 @@
-# inspired by https://github.com/karpathy/micrograd/blob/master/micrograd/engine.py
+"""The Tensor class — the user-facing API for all computation in tinygrad.
+
+Inspired by https://github.com/karpathy/micrograd/blob/master/micrograd/engine.py
+
+This is the most important file in tinygrad. The Tensor class provides a PyTorch-like API
+for tensor operations, but ALL operations are lazy — they build a UOp computation graph
+rather than executing immediately. Execution happens only when .realize(), .numpy(), .item(),
+or .tolist() is called.
+
+Key concepts:
+  - Every Tensor wraps a single UOp node (self.uop) representing its place in the computation graph
+  - Operations (add, reshape, sum, conv2d, etc.) create new UOp nodes and return new Tensors
+  - The Tensor class inherits from OpMixin which provides elementwise, reduce, and complex operations
+  - Autograd: .backward() computes gradients by calling compute_gradient() on the UOp graph
+  - Realization: .realize() -> schedule creation -> codegen -> compilation -> execution
+
+The Tensor class itself handles:
+  - Construction from Python lists, numpy arrays, or factory methods (rand, zeros, etc.)
+  - The .realize() / .numpy() / .item() execution path
+  - Gradient tracking and .backward()
+  - Device placement and multi-device sharding
+  - The training context (Tensor.train())
+
+Operations are defined in the mixin/ package and the latter half of this file:
+  - mixin/elementwise.py: arithmetic, activations, comparisons
+  - mixin/reduce.py: sum, max, mean, etc.
+  - mixin/movement.py: reshape, permute, pad, etc.
+  - mixin/__init__.py: dot, conv2d, loss functions, etc.
+
+Key exports: Tensor
+"""
 from __future__ import annotations
 import time, math, itertools, functools, struct, sys, inspect, pathlib, string, hashlib, weakref
 from contextlib import ContextDecorator
@@ -19,9 +49,16 @@ from tinygrad.engine.realize import run_schedule
 from tinygrad.callify import transform_to_call
 
 # *** all in scope Tensors are here. this gets relevant UOps ***
-
+# all_tensors tracks every live Tensor via weak references. This is used by _apply_map_to_tensors
+# to update tensor UOps in-place when the graph is rewritten (e.g., after realize()).
 all_tensors: dict[weakref.ref[Tensor], None] = {}
 def _apply_map_to_tensors(applied_map:dict[UOp, UOp], name:str, walk:bool=False) -> None:
+  """Apply a UOp substitution map to all live Tensors.
+
+  After scheduling or realization, UOp nodes get replaced (e.g., lazy REDUCE_AXIS becomes
+  a realized BUFFER). This function walks all live Tensors and updates their .uop references
+  to point to the new nodes. Uses weak references so dead Tensors are skipped.
+  """
   with cpu_profile(TracingKey(name), "TINY"):
     # get tensors in scope
     in_scope: dict[UOp, bool] = {}

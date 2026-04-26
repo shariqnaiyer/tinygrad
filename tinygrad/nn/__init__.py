@@ -1,3 +1,9 @@
+"""Neural network layer modules (BatchNorm, Conv, Linear, normalization, Embedding, LSTM).
+
+All layers follow the same convention: __init__ creates learnable parameters as Tensors, and __call__ runs the forward pass.
+Weight initialization uses uniform distributions scaled by fan-in, matching PyTorch's defaults (Kaiming uniform for Conv, Linear).
+The nn subpackage also re-exports optim, state, and datasets for convenient access via `import tinygrad.nn`.
+"""
 from __future__ import annotations
 import math, functools
 from tinygrad.tensor import Tensor
@@ -39,6 +45,7 @@ class BatchNorm:
     if track_running_stats: self.running_mean, self.running_var = Tensor.zeros(sz, requires_grad=False), Tensor.ones(sz, requires_grad=False)
 
   def calc_stats(self, x:Tensor) -> tuple[Tensor, Tensor]:
+    """Returns (mean, var) for the batch. Uses running stats at inference time; computes from input during training."""
     shape_mask: list[int] = [1, -1, *([1]*(x.ndim-2))]
     if self.track_running_stats and not Tensor.training: return self.running_mean, self.running_var.reshape(shape=shape_mask).expand(x.shape)
     # This requires two full memory accesses to x
@@ -57,6 +64,7 @@ class BatchNorm:
       self.running_var.assign((1-self.momentum) * self.running_var + self.momentum * x.numel()/(x.numel()-x.shape[1]) * batch_var.detach())
       self.num_batches_tracked += 1
     return x.batchnorm(self.weight, self.bias, batch_mean, batch_var.add(self.eps).rsqrt())
+# PyTorch compat aliases -- BatchNorm is dimension-agnostic since it normalizes over all dims except channel (dim 1)
 BatchNorm2d = BatchNorm3d = BatchNorm
 
 def Conv1d(in_channels:int, out_channels:int, kernel_size:int, stride=1, padding:int|str=0, dilation=1, groups=1, bias=True) -> Conv2d:
@@ -297,7 +305,9 @@ class RMSNorm:
     self.eps = eps
     self.weight = Tensor.ones(dim) if elementwise_affine else None
 
-  def _norm(self, x:Tensor) -> Tensor: return x * (x.square().mean(-1, keepdim=True) + self.eps).rsqrt()
+  def _norm(self, x:Tensor) -> Tensor:
+    """RMS normalization without the learnable scale -- x / sqrt(mean(x^2) + eps)."""
+    return x * (x.square().mean(-1, keepdim=True) + self.eps).rsqrt()
 
   def __call__(self, x:Tensor) -> Tensor:
     x = self._norm(x.float()).cast(x.dtype)
@@ -305,6 +315,7 @@ class RMSNorm:
 
 from tinygrad.uop.ops import UOp, KernelInfo, Ops, AxisType
 def _embedding_bwd(grad_emb:UOp, call:UOp) -> tuple:
+  """Custom backward for Embedding when USE_ATOMICS is enabled. Uses atomic scatter-add to accumulate gradients into grad_weight."""
   weight, idx = call.src[1:]
   is_vocab_sharded = isinstance(weight.device, tuple) and weight.axis == 0
   # for multi-device: replicate grad_emb and idx on all devices
@@ -366,6 +377,7 @@ def _embedding_bwd(grad_emb:UOp, call:UOp) -> tuple:
   return (grad_weight_uop.cast(weight.dtype), None)
 
 def _embedding_fwd(weight:Tensor, idx:Tensor) -> Tensor:
+  """Non-atomic forward: one-hot encodes idx and multiplies by weight table. Simple but creates a large intermediate."""
   arange = Tensor.arange(weight.shape[0], requires_grad=False, device=weight.device)
   return (arange == idx.unsqueeze(-1)).unsqueeze(-1).where(weight, 0).sum(-2, dtype=weight.dtype)
 

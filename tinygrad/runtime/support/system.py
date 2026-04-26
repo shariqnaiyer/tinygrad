@@ -1,3 +1,4 @@
+"""Low-level system interface: VFIO/IOMMU setup, hugepage management, PCI BAR mapping, and host memory operations for HCQ devices."""
 from __future__ import annotations
 import os, mmap, array, functools, ctypes, select, contextlib, dataclasses, sys, itertools, struct, socket, subprocess, time, enum, atexit
 from tinygrad.helpers import round_up, getenv, OSX, temp, ceildiv, unwrap, fetch, system, _ensure_downloads_dir, DEBUG, flatten

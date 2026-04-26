@@ -1,3 +1,16 @@
+"""Qualcomm Hexagon DSP backend. Cross-compiles C code targeting the Hexagon V65 ISA (with HVX 128-byte vector
+extensions) via clang, then loads and executes the resulting shared library on the DSP through Qualcomm's FastRPC
+interface. The DSP communicates with the host CPU via shared ION memory buffers.
+
+Includes pattern matchers for HVX-specific intrinsics (e.g., vpackhub_sat for saturating pack) and a custom renderer
+entry point that generates the FastRPC boilerplate for buffer marshalling.
+
+Key classes:
+  DSPDevice    -- Compiled device that opens /dev/ion and initializes FastRPC communication with the DSP.
+  DSPRenderer  -- ClangRenderer subclass that emits Hexagon-specific C with HVX intrinsics.
+  DSPCompiler  -- Invokes clang with Hexagon target flags to produce a shared object.
+  DSPProgram   -- Executes a compiled DSP kernel via FastRPC.
+"""
 from __future__ import annotations
 import ctypes, os, mmap, tempfile, pathlib, array, functools, threading, contextlib, sys, subprocess, struct
 assert sys.platform != 'win32'
@@ -144,6 +157,8 @@ class DSPCompiler(Compiler):
 
 
 class DSPDevice(Compiled):
+  """Qualcomm Hexagon DSP device. Opens /dev/ion for shared memory allocation and initializes FastRPC communication
+  with the cDSP. Loads the fastrpc_shell binary and spawns an RPC listener for bidirectional host<->DSP calls."""
   def __init__(self, device:str=""):
     if getenv("MOCKDSP"): super().__init__(device, DSPAllocator(self), [MockDSPRenderer], MockDSPProgram)
     else:

@@ -1,3 +1,14 @@
+"""C-style source code generation for GPU and CPU backends.
+
+CStyleLanguage is the shared base for any backend whose output looks like C (OpenCL, CUDA, Metal, HIP, Clang).
+It walks the linearised UOps list and emits one C statement per UOp, using a PatternMatcher (string_rewrite)
+to select the right syntax for each operation.
+
+Concrete subclasses configure language-specific details (kernel typedef, shared memory prefix, workitem
+intrinsics, type maps) and append WMMA intrinsic helpers when tensor cores are used.
+
+ClangJITRenderer produces plain C compiled by clang for the CPU backend.
+"""
 from typing import Literal, Callable, cast
 import math, sys, struct
 from collections import defaultdict, Counter

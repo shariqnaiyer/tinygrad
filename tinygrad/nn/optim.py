@@ -1,3 +1,17 @@
+"""Optimizers for tinygrad, sorted in order of increasing complexity.
+
+Architecture:
+  Optimizer          -- base class that owns params, lr, zero_grad(), step(), and schedule_step().
+  OptimizerGroup     -- wraps multiple Optimizers so different param groups can use different settings.
+  LARS(Optimizer)    -- the real SGD/momentum/LARS/Muon implementation.
+  LAMB(Optimizer)    -- the real Adam/AdamW/LAMB implementation.
+  SGD, Adam, AdamW, Muon  -- factory *functions* (not classes) that return LARS or LAMB with the right flags.
+
+Key concepts:
+  _step(params, grads) -> (updates, extra_tensors)  -- subclasses override this to compute per-param updates.
+  schedule_step() -> list[Tensor]  -- returns all tensors that must be realized for one optimizer step (enables lazy scheduling).
+  Fused mode (FUSE_OPTIM=1): concatenates all params/grads into one flat buffer so the optimizer kernel runs once instead of per-param.
+"""
 # sorted in order of increasing complexity
 import itertools
 from tinygrad.helpers import dedup, flatten, getenv, unwrap, FUSE_OPTIM
@@ -9,6 +23,7 @@ class Optimizer:
   Base class for all optimizers.
   """
   def __init__(self, params: list[Tensor], lr: float, device=None, fused=FUSE_OPTIM):
+    """Deduplicates params, separates non-grad buffers, and builds the fused position map if fused mode is on."""
     if lr < 0: raise ValueError(f"Invalid learning rate: {lr}")
     # if requires_grad is None, but being put into an optimizer, set it to True
     for x in params:
@@ -23,9 +38,11 @@ class Optimizer:
     # store lr in at least float32 precision
     self.lr = Tensor(lr if getenv("CONST_LR") else [lr], requires_grad=False, device=self.device,
                      dtype=least_upper_dtype(dtypes.default_float, dtypes.float32))
+    # pos_params maps each param to its [start, end) offset in the concatenated flat buffer
     if self.fused: self.pos_params = list(itertools.accumulate(self.params, lambda x,y: x+y.numel(), initial=0))
 
   def _new_optim_param(self) -> list[Tensor]:
+    """Allocates optimizer state (e.g. momentum buffer). In fused mode, one flat tensor; otherwise one tensor per param."""
     if self.fused: return [Tensor.zeros(self.pos_params[-1], dtype=self.param_dtype, device=self.device, requires_grad=False)]
     if isinstance(self.device, tuple): return [Tensor.zeros_like(t, dtype=self.param_dtype, requires_grad=False) for t in self.params]
     else: return [Tensor.zeros(t.shape, dtype=self.param_dtype, device=self.device, requires_grad=False) for t in self.params]
@@ -60,8 +77,12 @@ class Optimizer:
     for i, tt in enumerate(self.params): tt.assign(self._apply_update(tt, updates[i]))
     return extra+self.params+self.buffers
 
-  def _step(self, params:list[Tensor], grads:list[Tensor]) -> tuple[list[Tensor], list[Tensor]]: raise NotImplementedError
-  def _apply_update(self, t:Tensor, up:Tensor) -> Tensor: return t.detach() - up.to(t.device)
+  def _step(self, params:list[Tensor], grads:list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
+    """Subclasses implement this: returns (per-param updates, extra state tensors to realize)."""
+    raise NotImplementedError
+  def _apply_update(self, t:Tensor, up:Tensor) -> Tensor:
+    """Default update rule: param = param - update. Subclasses can override for custom application (e.g. weight decay applied separately)."""
+    return t.detach() - up.to(t.device)
 
 class OptimizerGroup(Optimizer):
   """
@@ -75,6 +96,7 @@ class OptimizerGroup(Optimizer):
   def schedule_step(self) -> list[Tensor]: return [x for o in self.optimizers for x in o.schedule_step()]
 
 # LARS is essentially just trust ratio to SGD so if we just set the trust coeff 0.0 it's just standard SGD.
+# SGD, Adam, AdamW, and Muon are factory functions that return LARS or LAMB instances with specific flag combinations.
 def SGD(params: list[Tensor], lr=0.001, momentum=0.0, weight_decay=0.0, nesterov=False, classic=False, device=None, fused=FUSE_OPTIM):
   """
   Stochastic Gradient Descent (SGD) optimizer with optional momentum and weight decay.
@@ -111,8 +133,10 @@ class LARS(Optimizer):
     self.b = self._new_optim_param() if self.momentum else []
 
   def _step(self, params:list[Tensor], grads:list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
+    """Computes per-param updates with optional trust ratio (LARS), momentum, Nesterov, Newton-Schulz (Muon), and weight decay."""
     ret = []
     for i, (t, g) in enumerate(zip(params, grads)):
+      # trust ratio: scale the update by ||param|| / ||grad|| so large layers don't get disproportionately large updates
       if self.tcoef != 0:
         r1 = t.detach().square().sum().sqrt()
         r2 = g.square().sum().sqrt()
@@ -163,7 +187,9 @@ class LAMB(Optimizer):
     self.v = self._new_optim_param()
 
   def _step(self, params:list[Tensor], grads:list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
+    """Computes Adam/LAMB updates: bias-corrected first and second moment estimates, optional trust ratio (LAMB) and weight decay (AdamW)."""
     ret = []
+    # b1_t and b2_t track beta1^t and beta2^t for bias correction without storing t explicitly
     self.b1_t *= self.b1
     self.b2_t *= self.b2
     for i, (t, g) in enumerate(zip(params, grads)):

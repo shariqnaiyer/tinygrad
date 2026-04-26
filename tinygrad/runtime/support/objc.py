@@ -1,3 +1,4 @@
+"""Objective-C runtime bridge for macOS: message dispatch, class creation, and protocol conformance via libobjc (used by the Metal backend)."""
 import ctypes, ctypes.util, functools, sys
 from typing import TYPE_CHECKING, Any
 

@@ -1,3 +1,23 @@
+"""Rangeify: converts tensor-level operations into loop-level operations and splits them into kernels.
+
+This is the core of tinygrad's "fusion compiler" -- it decides which tensor ops fuse into a single kernel
+and which get materialized to intermediate buffers.  The pipeline (driven by get_kernel_graph at the bottom):
+
+  1. **Earliest rewrites**: resolve CALLs, split large reductions (split_reduceop), normalize STORE+AFTER
+     patterns, and handle COPY/size-0 edge cases.
+  2. **run_rangeify** (in indexing.py): walk the tensor DAG top-down, assigning RANGE loop variables to each
+     tensor axis.  Movement ops (RESHAPE, PERMUTE, EXPAND, SHRINK, PAD, FLIP) become index expressions over
+     those ranges.  Ops that need materialization (decided by the realize heuristic) get BUFFERIZE nodes.
+     REDUCE_AXIS becomes REDUCE with explicit RANGE src.
+  3. **Symbolic simplification + buffer folding**: constant buffers are folded away, redundant BUFFERIZE
+     nodes are removed when the cost heuristic says inlining is cheaper than an extra buffer.
+  4. **bufferize_to_store**: remaining BUFFERIZE nodes become actual BUFFER + STORE + AFTER patterns -- i.e.,
+     concrete memory allocations with write kernels.
+  5. **split_kernels**: each top-level STORE/END is extracted into its own kernel CALL, with PARAMs replacing
+     buffer references.  This is where the final per-kernel ASTs are formed.
+  6. **WAR dependency fixup**: write-after-read hazards are detected and extra AFTER edges are added so the
+     topological sort in create_schedule respects them.
+"""
 from dataclasses import dataclass, field, replace
 import itertools
 from tinygrad.dtype import dtypes, PtrDType, AddrSpace, Invalid
@@ -98,6 +118,13 @@ def normalize_store_after_target_chain(after:UOp, target:UOp, src:UOp):
   return after.replace(src=(root_target, root_target.store(src)))
 
 def split_reduceop(reduce:UOp, x:UOp):
+  """Split a large reduction into two phases to improve GPU occupancy.
+
+  When a reduce has a very large reduction dimension relative to its output, we split it: the first kernel
+  reduces along most of the axis (giving each thread block a manageable chunk), writing to an intermediate
+  buffer, and the second kernel finishes the reduction.  This is the classic "parallel reduction" pattern.
+  The split dimension is chosen to keep the intermediate buffer under 2**22 elements (tunable via env).
+  """
   if prod(reduce.shape) == 0: return None
   if not SPLIT_REDUCEOP or not all_int(x.shape) or (prod(x.shape)//prod(reduce.shape))<getenv("REDUCEOP_SPLIT_THRESHOLD", 32768): return None
   # if there are few globals, make some reduces into globals by splitting into two kernels
@@ -215,6 +242,12 @@ ALWAYS_RUN_OPS = {Ops.CONTIGUOUS, Ops.COPY, Ops.NOOP}
 
 # you don't know in the first pass if axes are going to die, this happens if there's an EXPAND to the left
 def cleanup_dead_axes(b:UOp):
+  """Remove BUFFERIZE ranges that don't actually contribute to the computation (dead axes).
+
+  After the first rangeify pass, some BUFFERIZE axes may be dead -- they iterate over a dimension that the
+  source computation doesn't depend on (e.g. from an EXPAND).  We detect these by checking if the RANGE
+  appears in the source's ranges, and replace dead axes with reshape(1)+expand to avoid unnecessary loops.
+  """
   # don't optimize ALWAYS_RUN_OPS or AFTER (AFTER is a buffer identity — ranges define consumer access, not computation)
   if b.src[0].op in ALWAYS_RUN_OPS or b.src[0].op is Ops.AFTER: return None
 
@@ -240,6 +273,14 @@ pm_gate_substitute = PatternMatcher([(UPat(GroupOp.All, name="b"), gate_substitu
 # if a buffer is being stored just for permutes or something, remove it
 # we want to reexpress the indexes of idx2 in terms of the implied b1
 def remove_bufferize(src:UOp, buf:UOp, idx:UOp):
+  """Cost-based decision: should we keep this intermediate buffer, or inline the computation?
+
+  A BUFFERIZE node means "materialize this value to a buffer".  But if the computation is cheap (few input
+  buffers, no reduces touching buffers), we can eliminate the intermediate by substituting its index
+  expressions directly into the consumer.  This saves a kernel launch and a memory round-trip.
+  The heuristic checks: number of accessed buffers, whether reduces touch global buffers, and the
+  output/input size ratio for partial-contiguous (PCONTIG) mode.
+  """
   # see if we can't do it, should this ever hit?
   assert len(buf.src) == len(idx.src), f"index on wrong bufferize, {len(buf.src)} != {len(idx.src)}"
   assert all(x.op in {Ops.RANGE, Ops.CONST} for x in buf.src[1:])
@@ -382,6 +423,13 @@ pm_limit_bufs = PatternMatcher([(UPat(set.union(GroupOp.Binary, GroupOp.Ternary)
 # NOTE: this has been fixed up a bit
 
 def bufferize_to_store(ctx:itertools.count, x:UOp, idx:UOp, allow_locals=True):
+  """Convert a BUFFERIZE node into an actual BUFFER + STORE + AFTER pattern.
+
+  This is where abstract "this value needs to be materialized" becomes a concrete memory allocation.
+  A fresh BUFFER UOp is created (global or local depending on address space), a STORE writes the computed
+  value into it, and AFTER establishes the dependency so consumers wait for the write to complete.
+  For local memory, a BARRIER is inserted after the store to ensure all workgroup threads see the write.
+  """
   size = prod(x.shape)
   rngs = sorted(idx.ranges, key=lambda x: x.arg)
   assert size > 0 and isinstance(size, int), f"no zero sized or symbolic sized buffers {size}"
@@ -546,6 +594,13 @@ pm_add_range_tags = PatternMatcher([
 ])
 
 def split_store(x:UOp) -> UOp|None:
+  """Extract a single STORE/END into its own kernel CALL UOp.
+
+  Each top-level STORE (with no open RANGE variables above it) becomes an independent kernel.
+  The rewrite replaces buffer references with PARAMs (positional arguments), renumbers ranges for
+  deduplication, and wraps the result in a CALL that lists the kernel AST and its buffer arguments.
+  COPY and BUFFER_VIEW ops are kept as special hardware-level ops rather than becoming SINK kernels.
+  """
   # if we have any open ranges here, we don't split
   if x.ranges: return None
   # raw STORE (not from bufferize_to_store) should be processed through its END wrapper, not independently
@@ -573,6 +628,13 @@ split_kernels = PatternMatcher([
 
 @profile_matches
 def get_kernel_graph(sink:UOp) -> UOp:
+  """Main entry point: lower a tensor-level SINK into a kernel-level DAG ready for topological scheduling.
+
+  Orchestrates the full rangeify pipeline: multi-device rewriting, earliest rewrites (call resolution,
+  reduction splitting, assign normalization), rangeify (movement ops to index math, realize decisions),
+  symbolic simplification, buffer allocation, kernel splitting, and WAR hazard fixup.
+  The returned UOp is a DAG of AFTER/CALL nodes that create_schedule will toposort into execution order.
+  """
   tsink = graph_rewrite(sink, multi_pm, name="multi_pm")
   if OPENPILOT_HACKS: tsink = graph_rewrite(tsink, pm_fold_moved_after, ctx={}, name="fold moved afters")
   tsink = graph_rewrite(tsink, pm_syntactic_sugar+pm_mops+earliest_rewrites, bottom_up=True, name="earliest rewrites")

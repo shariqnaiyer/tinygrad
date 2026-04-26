@@ -1,3 +1,22 @@
+"""BEAM search over kernel optimization configurations.
+
+Instead of hand-coded heuristics, BEAM search explores the space of possible Opt action
+sequences by actually compiling and timing each candidate kernel on the real device.
+
+How it works:
+  1. Start from the un-optimised Scheduler (kernel + renderer).
+  2. At each step, enumerate all valid single-step actions via get_kernel_actions().
+  3. Compile every candidate in parallel (multiprocessing pool) with a per-kernel timeout.
+  4. Time each compiled kernel on real hardware (_time_program), keeping the top `amt` fastest.
+  5. Repeat until no candidate improves the best time by more than BEAM_MIN_PROGRESS.
+  6. Cache the winning opt sequence to disk so subsequent runs skip the search.
+
+The search is bounded by several env-var knobs: BEAM_UPCAST_MAX, BEAM_LOCAL_MAX,
+BEAM_UOPS_MAX (prune kernels with too many micro-ops), BEAM_TIMEOUT_SEC (per-compile alarm),
+and PARALLEL (number of compile workers).
+
+The `actions` list at module level defines the full action vocabulary that BEAM considers.
+"""
 import functools, math, time, multiprocessing, traceback, signal, atexit
 from dataclasses import replace
 from tinygrad.uop.ops import sym_infer, AxisType, pyrender
@@ -95,6 +114,7 @@ def _ensure_buffer_alloc(bufs:list[Buffer]) -> list[Buffer]: return [buf.ensure_
 
 # get dictionary of all possible actions
 def get_kernel_actions(s:Scheduler, include_0=True, max_up:int|None=None) -> dict[int, Scheduler]:
+  """Enumerate all valid single-step optimisations from the current kernel state, returning {action_id: new_scheduler}."""
   acted, max_up, max_lcl = {0:s} if include_0 else {}, getenv("BEAM_UPCAST_MAX", 256) if max_up is None else max_up, getenv("BEAM_LOCAL_MAX", 1024)
   kernel_actions = actions.copy()
 
@@ -119,6 +139,7 @@ def get_kernel_actions(s:Scheduler, include_0=True, max_up:int|None=None) -> dic
 
 beam_pool, BEAM_DEBUG = None, getenv("BEAM_DEBUG")
 def beam_search(s:Scheduler, rawbufs:list[Buffer], amt:int, allow_test_size=True, disable_cache=IGNORE_BEAM_CACHE.value):
+  """Run BEAM search: iteratively expand the top-`amt` candidates until no further improvement."""
   global beam_pool
   key = {"ast": s.ast.key, "amt": amt, "allow_test_size": allow_test_size, "device": s.ren.target.device, "suffix": s.ren.suffix}
   if not disable_cache and CACHELEVEL >= 1 and (val:=diskcache_get("beam_search", key)) is not None:

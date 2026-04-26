@@ -1,3 +1,27 @@
+"""UOp class, PatternMatcher, graph rewriting, and all UOp manipulation utilities.
+
+This is the largest and most important file in tinygrad's compiler infrastructure. It defines:
+
+  - UOp: the single intermediate representation node. ALL computation in tinygrad is a DAG of UOps.
+    A UOp has: op (Ops enum), dtype (DType), src (tuple of input UOps), arg (operation-specific data),
+    and tag (optional metadata). UOps are deduplicated via UOpMetaClass — identical operations share
+    the same object.
+
+  - UOpMetaClass: metaclass that implements the flyweight/deduplication cache for UOps.
+
+  - PatternMatcher / UPat: the declarative graph rewriting system. PatternMatcher holds a list of
+    (UPat pattern, replacement function) rules. graph_rewrite() applies these rules until convergence.
+    This is how ALL compiler passes work — optimization, lowering, and rendering are all pattern matching.
+
+  - Graph utilities: toposort, substitute, simplify, sym_infer, pretty_print, etc.
+
+  - Symbolic arithmetic: UOps support +, *, //, %, <, etc. producing new UOp nodes. This enables
+    symbolic shape/stride computation throughout the compiler.
+
+  - Buffer management: buffers WeakKeyDictionary maps BUFFER UOps to their device Buffer objects.
+
+Key exports: UOp, UOpMetaClass, PatternMatcher, UPat, graph_rewrite, track_rewrites, pretty_print
+"""
 from __future__ import annotations
 from typing import Any, Callable, cast, TYPE_CHECKING, Type, Sequence, Iterable, Final, Iterator
 import sys, time, functools, itertools, math, operator, hashlib, os, types, pickle, pathlib, inspect, weakref, collections, struct
@@ -87,9 +111,21 @@ def pretty_print(x:UOp, cache=None, d=0)->str:
   return f"{' '*d}{f'x{cx[0]}:=' * (cx[1]>1)}{type(x).__name__}({x.op}, {x.dtype}, arg={x.argstr()}{x.tagstr()}, src=({srcs}))"
 
 class UOpMetaClass(type):
-  ucache:dict[tuple, weakref.ReferenceType[UOp]] = {}
+  """Metaclass that deduplicates UOp instances (flyweight pattern).
+
+  When creating a UOp(op, dtype, src, arg, tag), the metaclass first checks ucache for
+  an existing identical UOp (same op/dtype/src/arg/tag). If found, returns the cached
+  instance. This means identical computations share the same UOp object in memory,
+  which is critical for graph comparison (identity == equality) and memory efficiency.
+
+  The cache uses weak references so UOps that are no longer referenced anywhere get
+  garbage collected. This is also where SPEC validation happens — every new UOp is
+  checked against the specification if SPEC > 1.
+  """
+  ucache:dict[tuple, weakref.ReferenceType[UOp]] = {}  # global cache: (op, dtype, src, arg, tag) -> weakref(UOp)
   def __call__(cls, op:Ops, dtype:DType=dtypes.void, src:tuple[UOp,...]=tuple(), arg:Any=None, tag:Any=None,
                metadata:tuple[Metadata,...]|None=None, _buffer:Buffer|None=None):
+    # check cache first — if an identical UOp already exists, return it (deduplication)
     if (wret:=UOpMetaClass.ucache.get(key:=(op, dtype, src, arg, tag), None)) is not None and (ret:=wret()) is not None: return ret
     UOpMetaClass.ucache[key] = weakref.ref(created:=super().__call__(*key))
     if metadata is not None: all_metadata[created] = metadata

@@ -1,3 +1,15 @@
+"""Decompose complex operations into simpler primitives that hardware can execute.
+
+Handles two main categories:
+  1. Transcendental functions (sin, cos, exp, log, pow, etc.) — decomposed into polynomial
+     approximations using the Cody-Waite range reduction technique. The approximations are
+     minimax polynomials for float32/float16/float64.
+  2. Dtype decompositions — operations on unsupported dtypes are decomposed into operations
+     on supported dtypes (e.g., float64 operations on hardware that only supports float32).
+
+The decomposition rules are PatternMatcher rules applied as late rewrite patterns
+during codegen, after optimization but before rendering.
+"""
 from typing import Callable
 import math, functools
 from tinygrad.dtype import dtypes, DType, promo_lattice, truncate

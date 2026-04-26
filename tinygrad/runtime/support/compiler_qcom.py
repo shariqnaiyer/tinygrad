@@ -1,3 +1,4 @@
+"""Qualcomm Adreno shader compiler using the QCOM LLVM-based OpenCL compiler library."""
 import ctypes, struct
 from tinygrad.device import Compiler
 from tinygrad.helpers import DEBUG, system

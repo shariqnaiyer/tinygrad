@@ -1,3 +1,19 @@
+"""Map abstract loop RANGE dimensions to concrete GPU execution dimensions.
+
+Kernels express parallelism through RANGE UOps tagged with an AxisType (GLOBAL, LOCAL, WARP,
+THREAD, GROUP_REDUCE).  This module replaces those abstract ranges with hardware-specific
+SPECIAL UOps (gidx0, lidx0, etc.) that correspond to actual GPU block/thread indices.
+
+Key responsibilities:
+  - _group_dims / _split_dims -- reshape the kernel's logical dimension tuple so it fits within
+    the hardware's maximum grid/block sizes (e.g. 1024 threads per block, 65535 blocks).
+  - get_grouped_dims         -- produce the SPECIAL UOps for a given prefix ("gidx" or "lidx"),
+    handling both grouping (merging small dims) and splitting (factoring large dims).
+  - add_gpudims              -- the main rewrite: collects all RANGE nodes from the kernel SINK,
+    partitions them into global vs. local, asks the renderer for size limits, then substitutes
+    every parallelisable RANGE with the appropriate SPECIAL index expression.  Also inserts
+    INVALID masks for local ranges that don't participate in a given GLOBAL store.
+"""
 import math
 from tinygrad.uop.ops import UOp, Ops, sint, PatternMatcher, UPat, KernelInfo, ssimplify, AxisType, sint_to_uop
 from tinygrad.helpers import dedup, get_contraction
@@ -26,6 +42,7 @@ def _split_dims(dims, max_sizes):
   return tuple(_dims[:2] if _dims[2] == 1 else _dims[0] if _dims[1:3] == [1,1] else _dims)
 
 def get_grouped_dims(prefix, dims:tuple[sint, ...], max_sizes:tuple[int, ...]|None, reverse=False) -> list[UOp]:
+  """Produce SPECIAL UOps for `prefix` ("gidx"/"lidx") that cover `dims`, respecting hardware `max_sizes`."""
   if reverse: return get_grouped_dims(prefix, dims[::-1], max_sizes)[::-1]
   if max_sizes is None: limited = dims
   else:
@@ -56,6 +73,7 @@ def get_grouped_dims(prefix, dims:tuple[sint, ...], max_sizes:tuple[int, ...]|No
   return raw_idxs
 
 def add_gpudims(ctx:Renderer, s:UOp):
+  """Replace RANGE UOps (GLOBAL/LOCAL/WARP/THREAD) with SPECIAL hardware indices, and mask stores for unused local dims."""
   if s.arg is None: return None
   s_topo = list(s.toposort())
   if any(x.op is Ops.SPECIAL for x in s_topo): return None

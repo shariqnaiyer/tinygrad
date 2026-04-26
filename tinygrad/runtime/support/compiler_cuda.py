@@ -1,3 +1,4 @@
+"""CUDA compiler support: NVRTCCompiler (NVRTC runtime compilation) and CUDACompiler (ptxas assembler), plus PTX pretty-printing."""
 import hashlib, tempfile, ctypes, re, pathlib
 from tinygrad.helpers import to_char_p_p, colored, getenv, system
 from tinygrad.runtime.support.c import init_c_var
